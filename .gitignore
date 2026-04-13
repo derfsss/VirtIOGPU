@@ -1,0 +1,33 @@
+build/
+tests/test_gpu
+*.chip
+*.chip.debug
+
+# Reference binaries kept locally for disassembly/comparison
+*.card
+*.asm
+RadeonHD.chip
+siliconmotion502.chip
+sm502.chip
+virtiogpu_built.chip
+temp/
+
+# IDE / agent local state
+.claude/
+.clangd
+
+# AI agent instruction / context files -- local only, not published
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+GEMINI.md
+.cursorrules
+.cursor/
+.windsurfrules
+.aider*
+.github/copilot-instructions.md
+
+# Local planning documents -- not part of the published repo
+PLAN.md
+docs/PLAN.md
+docs/PHASE*_PLAN.md

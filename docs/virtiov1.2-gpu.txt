@@ -1,0 +1,508 @@
+5.7 GPU Device
+virtio-gpu is a virtio based graphics adapter. It can operate in 2D mode and in 3D mode. 3D mode will offload rendering ops to the host gpu and therefore requires a gpu with 3D support on the host machine.
+
+In 2D mode the virtio-gpu device provides support for ARGB Hardware cursors and multiple scanouts (aka heads).
+
+5.7.1 Device ID
+16
+
+5.7.2 Virtqueues
+0
+controlq - queue for sending control commands
+1
+cursorq - queue for sending cursor updates
+Both queues have the same format. Each request and each response have a fixed header, followed by command specific data fields. The separate cursor queue is the "fast track" for cursor commands (VIRTIO_GPU_CMD_UPDATE_CURSOR and VIRTIO_GPU_CMD_MOVE_CURSOR), so they go through without being delayed by time-consuming commands in the control queue.
+
+5.7.3 Feature bits
+VIRTIO_GPU_F_VIRGL (0)
+virgl 3D mode is supported.
+VIRTIO_GPU_F_EDID (1)
+EDID is supported.
+VIRTIO_GPU_F_RESOURCE_UUID (2)
+assigning resources UUIDs for export to other virtio devices is supported.
+VIRTIO_GPU_F_RESOURCE_BLOB (3)
+creating and using size-based blob resources is supported.
+VIRTIO_GPU_F_CONTEXT_INIT (4)
+multiple context types and synchronization timelines supported. Requires VIRTIO_GPU_F_VIRGL.
+5.7.4 Device configuration layout
+GPU device configuration uses the following layout structure and definitions:
+
+#define VIRTIO_GPU_EVENT_DISPLAY (1 << 0) 
+ 
+struct virtio_gpu_config { 
+        le32 events_read; 
+        le32 events_clear; 
+        le32 num_scanouts; 
+        le32 num_capsets; 
+};
+5.7.4.1 Device configuration fields
+events_read
+signals pending events to the driver. The driver MUST NOT write to this field.
+events_clear
+clears pending events in the device. Writing a ’1’ into a bit will clear the corresponding bit in events_read, mimicking write-to-clear behavior.
+num_scanouts
+specifies the maximum number of scanouts supported by the device. Minimum value is 1, maximum value is 16.
+num_capsets
+specifies the maximum number of capability sets supported by the device. The minimum value is zero.
+5.7.4.2 Events
+VIRTIO_GPU_EVENT_DISPLAY
+Display configuration has changed. The driver SHOULD use the VIRTIO_GPU_CMD_GET_DISPLAY_INFO command to fetch the information from the device. In case EDID support is negotiated (VIRTIO_GPU_F_EDID feature flag) the device SHOULD also fetch the updated EDID blobs using the VIRTIO_GPU_CMD_GET_EDID command.
+5.7.5 Device Requirements: Device Initialization
+The driver SHOULD query the display information from the device using the VIRTIO_GPU_CMD_GET_DISPLAY_INFO command and use that information for the initial scanout setup. In case EDID support is negotiated (VIRTIO_GPU_F_EDID feature flag) the device SHOULD also fetch the EDID information using the VIRTIO_GPU_CMD_GET_EDID command. If no information is available or all displays are disabled the driver MAY choose to use a fallback, such as 1024x768 at display 0.
+
+The driver SHOULD query all shared memory regions supported by the device. If the device supports shared memory, the shmid of a region MUST (see 2.10 Shared Memory Regions) be one of the following:
+
+enum virtio_gpu_shm_id { 
+        VIRTIO_GPU_SHM_ID_UNDEFINED = 0, 
+        VIRTIO_GPU_SHM_ID_HOST_VISIBLE = 1, 
+};
+The shared memory region with VIRTIO_GPU_SHM_ID_HOST_VISIBLE is referred as the "host visible memory region". The device MUST support the VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB and VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB if the host visible memory region is available.
+
+5.7.6 Device Operation
+The virtio-gpu is based around the concept of resources private to the host. The guest must DMA transfer into these resources, unless shared memory regions are supported. This is a design requirement in order to interface with future 3D rendering. In the unaccelerated 2D mode there is no support for DMA transfers from resources, just to them.
+
+Resources are initially simple 2D resources, consisting of a width, height and format along with an identifier. The guest must then attach backing store to the resources in order for DMA transfers to work. This is like a GART in a real GPU.
+
+5.7.6.1 Device Operation: Create a framebuffer and configure scanout
+Create a host resource using VIRTIO_GPU_CMD_RESOURCE_CREATE_2D.
+Allocate a framebuffer from guest ram, and attach it as backing storage to the resource just created, using VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING. Scatter lists are supported, so the framebuffer doesn’t need to be contignous in guest physical memory.
+Use VIRTIO_GPU_CMD_SET_SCANOUT to link the framebuffer to a display scanout.
+5.7.6.2 Device Operation: Update a framebuffer and scanout
+Render to your framebuffer memory.
+Use VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D to update the host resource from guest memory.
+Use VIRTIO_GPU_CMD_RESOURCE_FLUSH to flush the updated resource to the display.
+5.7.6.3 Device Operation: Using pageflip
+It is possible to create multiple framebuffers, flip between them using VIRTIO_GPU_CMD_SET_SCANOUT and VIRTIO_GPU_CMD_RESOURCE_FLUSH, and update the invisible framebuffer using VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D.
+
+5.7.6.4 Device Operation: Multihead setup
+In case two or more displays are present there are different ways to configure things:
+
+Create a single framebuffer, link it to all displays (mirroring).
+Create an framebuffer for each display.
+Create one big framebuffer, configure scanouts to display a different rectangle of that framebuffer each.
+5.7.6.5 Device Requirements: Device Operation: Command lifecycle and fencing
+The device MAY process controlq commands asyncronously and return them to the driver before the processing is complete. If the driver needs to know when the processing is finished it can set the VIRTIO_GPU_FLAG_FENCE flag in the request. The device MUST finish the processing before returning the command then.
+
+Note: current qemu implementation does asyncrounous processing only in 3d mode, when offloading the processing to the host gpu.
+
+5.7.6.6 Device Operation: Configure mouse cursor
+The mouse cursor image is a normal resource, except that it must be 64x64 in size. The driver MUST create and populate the resource (using the usual VIRTIO_GPU_CMD_RESOURCE_CREATE_2D, VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING and VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D controlq commands) and make sure they are completed (using VIRTIO_GPU_FLAG_FENCE).
+
+Then VIRTIO_GPU_CMD_UPDATE_CURSOR can be sent to the cursorq to set the pointer shape and position. To move the pointer without updating the shape use VIRTIO_GPU_CMD_MOVE_CURSOR instead.
+
+5.7.6.7 Device Operation: Request header
+All requests and responses on the virt queues have a fixed header using the following layout structure and definitions:
+
+enum virtio_gpu_ctrl_type { 
+ 
+        /* 2d commands */ 
+        VIRTIO_GPU_CMD_GET_DISPLAY_INFO = 0x0100, 
+        VIRTIO_GPU_CMD_RESOURCE_CREATE_2D, 
+        VIRTIO_GPU_CMD_RESOURCE_UNREF, 
+        VIRTIO_GPU_CMD_SET_SCANOUT, 
+        VIRTIO_GPU_CMD_RESOURCE_FLUSH, 
+        VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D, 
+        VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING, 
+        VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING, 
+        VIRTIO_GPU_CMD_GET_CAPSET_INFO, 
+        VIRTIO_GPU_CMD_GET_CAPSET, 
+        VIRTIO_GPU_CMD_GET_EDID, 
+        VIRTIO_GPU_CMD_RESOURCE_ASSIGN_UUID, 
+        VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB, 
+        VIRTIO_GPU_CMD_SET_SCANOUT_BLOB, 
+ 
+        /* 3d commands */ 
+        VIRTIO_GPU_CMD_CTX_CREATE = 0x0200, 
+        VIRTIO_GPU_CMD_CTX_DESTROY, 
+        VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, 
+        VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE, 
+        VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, 
+        VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, 
+        VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, 
+        VIRTIO_GPU_CMD_SUBMIT_3D, 
+        VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB, 
+        VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB, 
+ 
+        /* cursor commands */ 
+        VIRTIO_GPU_CMD_UPDATE_CURSOR = 0x0300, 
+        VIRTIO_GPU_CMD_MOVE_CURSOR, 
+ 
+        /* success responses */ 
+        VIRTIO_GPU_RESP_OK_NODATA = 0x1100, 
+        VIRTIO_GPU_RESP_OK_DISPLAY_INFO, 
+        VIRTIO_GPU_RESP_OK_CAPSET_INFO, 
+        VIRTIO_GPU_RESP_OK_CAPSET, 
+        VIRTIO_GPU_RESP_OK_EDID, 
+        VIRTIO_GPU_RESP_OK_RESOURCE_UUID, 
+        VIRTIO_GPU_RESP_OK_MAP_INFO, 
+ 
+        /* error responses */ 
+        VIRTIO_GPU_RESP_ERR_UNSPEC = 0x1200, 
+        VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY, 
+        VIRTIO_GPU_RESP_ERR_INVALID_SCANOUT_ID, 
+        VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID, 
+        VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID, 
+        VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, 
+}; 
+ 
+#define VIRTIO_GPU_FLAG_FENCE (1 << 0) 
+#define VIRTIO_GPU_FLAG_INFO_RING_IDX (1 << 1) 
+ 
+struct virtio_gpu_ctrl_hdr { 
+        le32 type; 
+        le32 flags; 
+        le64 fence_id; 
+        le32 ctx_id; 
+        u8 ring_idx; 
+        u8 padding[3]; 
+};
+The fixed header struct virtio_gpu_ctrl_hdr in each request includes the following fields:
+
+type
+specifies the type of the driver request (VIRTIO_GPU_CMD_*) or device response (VIRTIO_GPU_RESP_*).
+flags
+request / response flags.
+fence_id
+If the driver sets the VIRTIO_GPU_FLAG_FENCE bit in the request flags field the device MUST:
+set VIRTIO_GPU_FLAG_FENCE bit in the response,
+copy the content of the fence_id field from the request to the response, and
+send the response only after command processing is complete.
+ctx_id
+Rendering context (used in 3D mode only).
+ring_idx
+If VIRTIO_GPU_F_CONTEXT_INIT is supported, then the driver MAY set VIRTIO_GPU_FLAG_INFO_RING_IDX bit in the request flags. In that case:
+ring_idx indicates the value of a context-specific ring index. The minimum value is 0 and maximum value is 63 (inclusive).
+If VIRTIO_GPU_FLAG_FENCE is set, fence_id acts as a sequence number on the synchronization timeline defined by ctx_idx and the ring index.
+If VIRTIO_GPU_FLAG_FENCE is set and when the command associated with fence_id is complete, the device MUST send a response for all outstanding commands with a sequence number less than or equal to fence_id on the same synchronization timeline.
+On success the device will return VIRTIO_GPU_RESP_OK_NODATA in case there is no payload. Otherwise the type field will indicate the kind of payload.
+
+On error the device will return one of the VIRTIO_GPU_RESP_ERR_* error codes.
+
+5.7.6.8 Device Operation: controlq
+For any coordinates given 0,0 is top left, larger x moves right, larger y moves down.
+
+VIRTIO_GPU_CMD_GET_DISPLAY_INFO
+Retrieve the current output configuration. No request data (just bare struct virtio_gpu_ctrl_hdr). Response type is VIRTIO_GPU_RESP_OK_DISPLAY_INFO, response data is struct virtio_gpu_resp_display_info.
+#define VIRTIO_GPU_MAX_SCANOUTS 16 
+ 
+struct virtio_gpu_rect { 
+        le32 x; 
+        le32 y; 
+        le32 width; 
+        le32 height; 
+}; 
+ 
+struct virtio_gpu_resp_display_info { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        struct virtio_gpu_display_one { 
+                struct virtio_gpu_rect r; 
+                le32 enabled; 
+                le32 flags; 
+        } pmodes[VIRTIO_GPU_MAX_SCANOUTS]; 
+};
+The response contains a list of per-scanout information. The info contains whether the scanout is enabled and what its preferred position and size is.
+
+The size (fields width and height) is similar to the native panel resolution in EDID display information, except that in the virtual machine case the size can change when the host window representing the guest display is gets resized.
+
+The position (fields x and y) describe how the displays are arranged (i.e. which is – for example – the left display).
+
+The enabled field is set when the user enabled the display. It is roughly the same as the connected state of a phyiscal display connector.
+
+VIRTIO_GPU_CMD_GET_EDID
+Retrieve the EDID data for a given scanout. Request data is struct virtio_gpu_get_edid). Response type is VIRTIO_GPU_RESP_OK_EDID, response data is struct virtio_gpu_resp_edid. Support is optional and negotiated using the VIRTIO_GPU_F_EDID feature flag.
+struct virtio_gpu_get_edid { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        le32 scanout; 
+        le32 padding; 
+}; 
+ 
+struct virtio_gpu_resp_edid { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        le32 size; 
+        le32 padding; 
+        u8 edid[1024]; 
+};
+The response contains the EDID display data blob (as specified by VESA) for the scanout.
+
+VIRTIO_GPU_CMD_RESOURCE_CREATE_2D
+Create a 2D resource on the host. Request data is struct virtio_gpu_resource_create_2d. Response type is VIRTIO_GPU_RESP_OK_NODATA.
+enum virtio_gpu_formats { 
+        VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM  = 1, 
+        VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM  = 2, 
+        VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM  = 3, 
+        VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM  = 4, 
+ 
+        VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM  = 67, 
+        VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM  = 68, 
+ 
+        VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM  = 121, 
+        VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM  = 134, 
+}; 
+ 
+struct virtio_gpu_resource_create_2d { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        le32 resource_id; 
+        le32 format; 
+        le32 width; 
+        le32 height; 
+};
+This creates a 2D resource on the host with the specified width, height and format. The resource ids are generated by the guest.
+
+VIRTIO_GPU_CMD_RESOURCE_UNREF
+Destroy a resource. Request data is struct virtio_gpu_resource_unref. Response type is VIRTIO_GPU_RESP_OK_NODATA.
+struct virtio_gpu_resource_unref { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        le32 resource_id; 
+        le32 padding; 
+};
+This informs the host that a resource is no longer required by the guest.
+
+VIRTIO_GPU_CMD_SET_SCANOUT
+Set the scanout parameters for a single output. Request data is struct virtio_gpu_set_scanout. Response type is VIRTIO_GPU_RESP_OK_NODATA.
+struct virtio_gpu_set_scanout { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        struct virtio_gpu_rect r; 
+        le32 scanout_id; 
+        le32 resource_id; 
+};
+This sets the scanout parameters for a single scanout. The resource_id is the resource to be scanned out from, along with a rectangle.
+
+Scanout rectangles must be completely covered by the underlying resource. Overlapping (or identical) scanouts are allowed, typical use case is screen mirroring.
+
+The driver can use resource_id = 0 to disable a scanout.
+
+VIRTIO_GPU_CMD_RESOURCE_FLUSH
+Flush a scanout resource Request data is struct virtio_gpu_resource_flush. Response type is VIRTIO_GPU_RESP_OK_NODATA.
+struct virtio_gpu_resource_flush { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        struct virtio_gpu_rect r; 
+        le32 resource_id; 
+        le32 padding; 
+};
+This flushes a resource to screen. It takes a rectangle and a resource id, and flushes any scanouts the resource is being used on.
+
+VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D
+Transfer from guest memory to host resource. Request data is struct virtio_gpu_transfer_to_host_2d. Response type is VIRTIO_GPU_RESP_OK_NODATA.
+struct virtio_gpu_transfer_to_host_2d { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        struct virtio_gpu_rect r; 
+        le64 offset; 
+        le32 resource_id; 
+        le32 padding; 
+};
+This takes a resource id along with an destination offset into the resource, and a box to transfer to the host backing for the resource.
+
+VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING
+Assign backing pages to a resource. Request data is struct virtio_gpu_resource_attach_backing, followed by struct virtio_gpu_mem_entry entries. Response type is VIRTIO_GPU_RESP_OK_NODATA.
+struct virtio_gpu_resource_attach_backing { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        le32 resource_id; 
+        le32 nr_entries; 
+}; 
+ 
+struct virtio_gpu_mem_entry { 
+        le64 addr; 
+        le32 length; 
+        le32 padding; 
+};
+This assign an array of guest pages as the backing store for a resource. These pages are then used for the transfer operations for that resource from that point on.
+
+VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING
+Detach backing pages from a resource. Request data is struct virtio_gpu_resource_detach_backing. Response type is VIRTIO_GPU_RESP_OK_NODATA.
+struct virtio_gpu_resource_detach_backing { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        le32 resource_id; 
+        le32 padding; 
+};
+This detaches any backing pages from a resource, to be used in case of guest swapping or object destruction.
+
+VIRTIO_GPU_CMD_GET_CAPSET_INFO
+Gets the information associated with a particular capset_index, which MUST less than num_capsets defined in the device configuration. Request data is struct virtio_gpu_get_capset_info. Response type is VIRTIO_GPU_RESP_OK_CAPSET_INFO.
+On success, struct virtio_gpu_resp_capset_info contains the capset_id, capset_max_version, capset_max_size associated with capset at the specified capset_idex. fieldcapset_id MUST be one of the following (see listing for values):
+
+VIRTIO_GPU_CAPSET_VIRGL – the first edition of Virgl (Gallium OpenGL) protocol.
+VIRTIO_GPU_CAPSET_VIRGL2 – the second edition of Virgl (Gallium OpenGL) protocol after the capset fix.
+VIRTIO_GPU_CAPSET_GFXSTREAM – gfxtream’s (mostly) autogenerated GLES and Vulkan streaming protocols.
+VIRTIO_GPU_CAPSET_VENUS – Mesa’s (mostly) autogenerated Vulkan protocol.
+VIRTIO_GPU_CAPSET_CROSS_DOMAIN – protocol for display virtualization via Wayland proxying.
+struct virtio_gpu_get_capset_info { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        le32 capset_index; 
+        le32 padding; 
+}; 
+ 
+#define VIRTIO_GPU_CAPSET_VIRGL 1 
+#define VIRTIO_GPU_CAPSET_VIRGL2 2 
+#define VIRTIO_GPU_CAPSET_GFXSTREAM 3 
+#define VIRTIO_GPU_CAPSET_VENUS 4 
+#define VIRTIO_GPU_CAPSET_CROSS_DOMAIN 5 
+struct virtio_gpu_resp_capset_info { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        le32 capset_id; 
+        le32 capset_max_version; 
+        le32 capset_max_size; 
+        le32 padding; 
+};
+VIRTIO_GPU_CMD_GET_CAPSET
+Gets the capset associated with a particular capset_id and capset_version. Request data is struct virtio_gpu_get_capset. Response type is VIRTIO_GPU_RESP_OK_CAPSET.
+struct virtio_gpu_get_capset { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        le32 capset_id; 
+        le32 capset_version; 
+}; 
+ 
+struct virtio_gpu_resp_capset { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        u8 capset_data[]; 
+};
+VIRTIO_GPU_CMD_RESOURCE_ASSIGN_UUID
+Creates an exported object from a resource. Request data is struct virtio_gpu_resource_assign_uuid. Response type is VIRTIO_GPU_RESP_OK_RESOURCE_UUID, response data is struct virtio_gpu_resp_resource_uuid. Support is optional and negotiated using the VIRTIO_GPU_F_RESOURCE_UUID feature flag.
+struct virtio_gpu_resource_assign_uuid { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        le32 resource_id; 
+        le32 padding; 
+}; 
+ 
+struct virtio_gpu_resp_resource_uuid { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        u8 uuid[16]; 
+};
+The response contains a UUID which identifies the exported object created from the host private resource. Note that if the resource has an attached backing, modifications made to the host private resource through the exported object by other devices are not visible in the attached backing until they are transferred into the backing.
+
+VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB
+Creates a virtio-gpu blob resource. Request data is struct virtio_gpu_resource_create_blob, followed by struct virtio_gpu_mem_entry entries. Response type is VIRTIO_GPU_RESP_OK_NODATA. Support is optional and negotiated using the VIRTIO_GPU_F_RESOURCE_BLOB feature flag.
+#define VIRTIO_GPU_BLOB_MEM_GUEST             0x0001 
+#define VIRTIO_GPU_BLOB_MEM_HOST3D            0x0002 
+#define VIRTIO_GPU_BLOB_MEM_HOST3D_GUEST      0x0003 
+ 
+#define VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE     0x0001 
+#define VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE    0x0002 
+#define VIRTIO_GPU_BLOB_FLAG_USE_CROSS_DEVICE 0x0004 
+ 
+struct virtio_gpu_resource_create_blob { 
+       struct virtio_gpu_ctrl_hdr hdr; 
+       le32 resource_id; 
+       le32 blob_mem; 
+       le32 blob_flags; 
+       le32 nr_entries; 
+       le64 blob_id; 
+       le64 size; 
+};
+A blob resource is a container for:
+
+a guest memory allocation (referred to as a "guest-only blob resource").
+a host memory allocation (referred to as a "host-only blob resource").
+a guest memory and host memory allocation (referred to as a "default blob resource").
+The memory properties of the blob resource MUST be described by blob_mem, which MUST be non-zero.
+
+For default and guest-only blob resources, nr_entries guest memory entries may be assigned to the resource. For default blob resources (i.e, when blob_mem is VIRTIO_GPU_BLOB_MEM_HOST3D_GUEST), these memory entries are used as a shadow buffer for the host memory. To facilitate drivers that support swap-in and swap-out, nr_entries may be zero and VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING may be subsequently used. VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING may be used to unassign memory entries.
+
+blob_mem can only be VIRTIO_GPU_BLOB_MEM_HOST3D and VIRTIO_GPU_BLOB_MEM_HOST3D_GUEST if VIRTIO_GPU_F_VIRGL is supported. VIRTIO_GPU_BLOB_MEM_GUEST is valid regardless whether VIRTIO_GPU_F_VIRGL is supported or not.
+
+For VIRTIO_GPU_BLOB_MEM_HOST3D and VIRTIO_GPU_BLOB_MEM_HOST3D_GUEST, the virtio-gpu resource MUST be created from the rendering context local object identified by the blob_id. The actual allocation is done via VIRTIO_GPU_CMD_SUBMIT_3D.
+
+The driver MUST inform the device if the blob resource is used for memory access, sharing between driver instances and/or sharing with other devices. This is done via the blob_flags field.
+
+If VIRTIO_GPU_F_VIRGL is set, both VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D and VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D may be used to update the resource. There is no restriction on the image/buffer view the driver has on the blob resource.
+
+VIRTIO_GPU_CMD_SET_SCANOUT_BLOB
+sets scanout parameters for a blob resource. Request data is struct virtio_gpu_set_scanout_blob. Response type is VIRTIO_GPU_RESP_OK_NODATA. Support is optional and negotiated using the VIRTIO_GPU_F_RESOURCE_BLOB feature flag.
+struct virtio_gpu_set_scanout_blob { 
+       struct virtio_gpu_ctrl_hdr hdr; 
+       struct virtio_gpu_rect r; 
+       le32 scanout_id; 
+       le32 resource_id; 
+       le32 width; 
+       le32 height; 
+       le32 format; 
+       le32 padding; 
+       le32 strides[4]; 
+       le32 offsets[4]; 
+};
+The rectangle r represents the portion of the blob resource being displayed. The rest is the metadata associated with the blob resource. The format MUST be one of enum virtio_gpu_formats. The format MAY be compressed with header and data planes.
+
+5.7.6.9 Device Operation: controlq (3d)
+These commands are supported by the device if the VIRTIO_GPU_F_VIRGL feature flag is set.
+
+VIRTIO_GPU_CMD_CTX_CREATE
+creates a context for submitting an opaque command stream. Request data is struct virtio_gpu_ctx_create. Response type is VIRTIO_GPU_RESP_OK_NODATA.
+#define VIRTIO_GPU_CONTEXT_INIT_CAPSET_ID_MASK 0x000000ff; 
+struct virtio_gpu_ctx_create { 
+       struct virtio_gpu_ctrl_hdr hdr; 
+       le32 nlen; 
+       le32 context_init; 
+       char debug_name[64]; 
+};
+The implementation MUST create a context for the given ctx_id in the hdr. For debugging purposes, a debug_name and it’s length nlen is provided by the driver. If VIRTIO_GPU_F_CONTEXT_INIT is supported, then lower 8 bits of context_init MAY contain the capset_id associated with context. In that case, then the device MUST create a context that can handle the specified command stream.
+
+If the lower 8-bits of the context_init are zero, then the type of the context is determined by the device.
+
+VIRTIO_GPU_CMD_CTX_DESTROY
+VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE
+VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE
+Manage virtio-gpu 3d contexts.
+VIRTIO_GPU_CMD_RESOURCE_CREATE_3D
+Create virtio-gpu 3d resources.
+VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D
+VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D
+Transfer data from and to virtio-gpu 3d resources.
+VIRTIO_GPU_CMD_SUBMIT_3D
+Submit an opaque command stream. The type of the command stream is determined when creating a context.
+VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB
+maps a host-only blob resource into an offset in the host visible memory region. Request data is struct virtio_gpu_resource_map_blob. The driver MUST not map a blob resource that is already mapped. Response type is VIRTIO_GPU_RESP_OK_MAP_INFO. Support is optional and negotiated using the VIRTIO_GPU_F_RESOURCE_BLOB feature flag and checking for the presence of the host visible memory region.
+struct virtio_gpu_resource_map_blob { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        le32 resource_id; 
+        le32 padding; 
+        le64 offset; 
+}; 
+ 
+#define VIRTIO_GPU_MAP_CACHE_MASK      0x0f 
+#define VIRTIO_GPU_MAP_CACHE_NONE      0x00 
+#define VIRTIO_GPU_MAP_CACHE_CACHED    0x01 
+#define VIRTIO_GPU_MAP_CACHE_UNCACHED  0x02 
+#define VIRTIO_GPU_MAP_CACHE_WC        0x03 
+struct virtio_gpu_resp_map_info { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        u32 map_info; 
+        u32 padding; 
+};
+VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB
+unmaps a host-only blob resource from the host visible memory region. Request data is struct virtio_gpu_resource_unmap_blob. Response type is VIRTIO_GPU_RESP_OK_NODATA. Support is optional and negotiated using the VIRTIO_GPU_F_RESOURCE_BLOB feature flag and checking for the presence of the host visible memory region.
+struct virtio_gpu_resource_unmap_blob { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        le32 resource_id; 
+        le32 padding; 
+};
+5.7.6.10 Device Operation: cursorq
+Both cursorq commands use the same command struct.
+
+struct virtio_gpu_cursor_pos { 
+        le32 scanout_id; 
+        le32 x; 
+        le32 y; 
+        le32 padding; 
+}; 
+ 
+struct virtio_gpu_update_cursor { 
+        struct virtio_gpu_ctrl_hdr hdr; 
+        struct virtio_gpu_cursor_pos pos; 
+        le32 resource_id; 
+        le32 hot_x; 
+        le32 hot_y; 
+        le32 padding; 
+};
+VIRTIO_GPU_CMD_UPDATE_CURSOR
+Update cursor. Request data is struct virtio_gpu_update_cursor. Response type is VIRTIO_GPU_RESP_OK_NODATA.
+Full cursor update. Cursor will be loaded from the specified resource_id and will be moved to pos. The driver must transfer the cursor into the resource beforehand (using control queue commands) and make sure the commands to fill the resource are actually processed (using fencing).
+
+VIRTIO_GPU_CMD_MOVE_CURSOR
+Move cursor. Request data is struct virtio_gpu_update_cursor. Response type is VIRTIO_GPU_RESP_OK_NODATA.
+Move cursor to the place specified in pos. The other fields are not used and will be ignored by the device.
+
+5.7.7 VGA Compatibility
+Applies to Virtio Over PCI only. The GPU device can come with and without VGA compatibility. The PCI class should be DISPLAY_VGA if VGA compatibility is present and DISPLAY_OTHER otherwise.
+
+VGA compatibility: PCI region 0 has the linear framebuffer, standard vga registers are present. Configuring a scanout (VIRTIO_GPU_CMD_SET_SCANOUT) switches the device from vga compatibility mode into native virtio mode. A reset switches it back into vga compatibility mode.
+
+Note: qemu implementation also provides bochs dispi interface io ports and mmio bar at pci region 1 and is therefore fully compatible with the qemu stdvga (see docs/specs/standard-vga.txt in the qemu source tree).

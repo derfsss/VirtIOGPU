@@ -46,7 +46,7 @@ static APTR chip_FindCard(struct Interface *Self,
     struct ExecIFace   *IExec = (struct ExecIFace *)sb->MainInterface;
 
     if (IExec) {
-        IExec->DebugPrintF("[virtiogpu.chip] v53.153-null-vtable chip_FindCard ENTRY bi=%p cardDesc=%p\n",
+        IExec->DebugPrintF("[virtiogpu.chip] v53.157-cursor-signed-fix chip_FindCard ENTRY bi=%p cardDesc=%p\n",
                            bi, cardDesc);
     }
 

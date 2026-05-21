@@ -836,8 +836,14 @@ void chip_CursorUpdate(struct ChipGPUState *gs, uint32 hot_x, uint32 hot_y)
 {
     if (!gs->cursor_created) return;
 
-    DCHIP("UPDATE_CURSOR pos=%d,%d hot=%lu,%lu res=%lu active=%lux%lu",
-          (int)gs->cursor_x, (int)gs->cursor_y,
+    /* VirtIO GPU cursor positions are unsigned.  graphics.library parks
+     * the pointer at negative coords (off the top/left edge); clamp those
+     * to 0 so a signed -9 doesn't reach the device as 0xFFFFFFF7. */
+    uint32 px = (gs->cursor_x < 0) ? 0 : (uint32)gs->cursor_x;
+    uint32 py = (gs->cursor_y < 0) ? 0 : (uint32)gs->cursor_y;
+
+    DCHIP("UPDATE_CURSOR pos=%lu,%lu (raw %d,%d) hot=%lu,%lu res=%lu active=%lux%lu",
+          (ULONG)px, (ULONG)py, (int)gs->cursor_x, (int)gs->cursor_y,
           (ULONG)hot_x, (ULONG)hot_y,
           (ULONG)gs->cursor_resource_id,
           (ULONG)gs->active_width, (ULONG)gs->active_height);
@@ -849,8 +855,7 @@ void chip_CursorUpdate(struct ChipGPUState *gs, uint32 hot_x, uint32 hot_y)
     /* Send UPDATE_CURSOR on cursor queue.
      * Include current position so QEMU doesn't warp cursor to (0,0). */
     chip_cursor_send(gs, VIRTIO_GPU_CMD_UPDATE_CURSOR,
-                      gs->cursor_resource_id,
-                      (uint32)gs->cursor_x, (uint32)gs->cursor_y,
+                      gs->cursor_resource_id, px, py,
                       hot_x, hot_y);
     /* Track what we've pushed so the post-SetGC MOVE_CURSOR refresh
      * (in chip_SetSpritePosition) only fires when the position has
@@ -862,15 +867,24 @@ void chip_CursorUpdate(struct ChipGPUState *gs, uint32 hot_x, uint32 hot_y)
 /* -----------------------------------------------------------------------
  * chip_CursorMove -- move cursor position without changing image.
  * ----------------------------------------------------------------------- */
-void chip_CursorMove(struct ChipGPUState *gs, uint32 x, uint32 y)
+void chip_CursorMove(struct ChipGPUState *gs, WORD x, WORD y)
 {
     if (!gs->cursor_created) return;
 
-    gs->cursor_x = (WORD)x;
-    gs->cursor_y = (WORD)y;
+    gs->cursor_x = x;
+    gs->cursor_y = y;
+
+    /* Clamp off-edge negatives -- VirtIO GPU cursor pos is unsigned. */
+    uint32 px = (x < 0) ? 0 : (uint32)x;
+    uint32 py = (y < 0) ? 0 : (uint32)y;
+
+    DCHIP("MOVE_CURSOR pos=%lu,%lu (raw %d,%d) res=%lu active=%lux%lu",
+          (ULONG)px, (ULONG)py, (int)x, (int)y,
+          (ULONG)gs->cursor_resource_id,
+          (ULONG)gs->active_width, (ULONG)gs->active_height);
 
     chip_cursor_send(gs, VIRTIO_GPU_CMD_MOVE_CURSOR,
-                      gs->cursor_resource_id, x, y, 0, 0);
+                      gs->cursor_resource_id, px, py, 0, 0);
 }
 
 /* -----------------------------------------------------------------------

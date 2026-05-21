@@ -823,7 +823,7 @@ static BOOL chip_SetSprite(struct BoardInfo *bi, BOOL activate, RGBFTYPE format)
     return activate;
 }
 
-static void chip_SetSpritePosition(struct BoardInfo *bi, UWORD x, UWORD y,
+static void chip_SetSpritePosition(struct BoardInfo *bi, WORD x, WORD y,
                                     RGBFTYPE format)
 {
     (void)format;
@@ -831,10 +831,8 @@ static void chip_SetSpritePosition(struct BoardInfo *bi, UWORD x, UWORD y,
     if (!gs) return;
     gs->stat_setspritepos++;
 
-    (void)bi;
-
-    gs->cursor_x = (WORD)x;
-    gs->cursor_y = (WORD)y;
+    gs->cursor_x = x;
+    gs->cursor_y = y;
 
     /* One-shot MOVE_CURSOR after a SetGC mode change.  AmigaOS rescales
      * its internal mouse coords to the new screen size (e.g.
@@ -846,24 +844,24 @@ static void chip_SetSpritePosition(struct BoardInfo *bi, UWORD x, UWORD y,
      * aligned with what AmigaOS thinks the position is, without the
      * per-move flicker that previous always-MOVE_CURSOR attempts hit. */
     if (gs->cursor_needs_refresh && gs->cursor_created &&
-        ((WORD)x != gs->cursor_last_sent_x ||
-         (WORD)y != gs->cursor_last_sent_y))
+        (x != gs->cursor_last_sent_x || y != gs->cursor_last_sent_y))
     {
         chip_CursorMove(gs, x, y);
-        gs->cursor_last_sent_x = (WORD)x;
-        gs->cursor_last_sent_y = (WORD)y;
+        gs->cursor_last_sent_x = x;
+        gs->cursor_last_sent_y = y;
         gs->cursor_needs_refresh = FALSE;
-        DCHIP("SpritePos: post-SetGC refresh -- MOVE_CURSOR(%u,%u)",
-              (unsigned)x, (unsigned)y);
+        DCHIP("SpritePos: post-SetGC refresh -- MOVE_CURSOR(%d,%d)",
+              (int)x, (int)y);
     }
 
-    /* Diagnostic: warn when cursor position lands outside the active scanout
-     * (could indicate the guest is reasoning in a different coord space than
-     * the scanout we configured) -- log at most once per second. */
-    if (bi && (x >= gs->active_width || y >= gs->active_height)) {
+    /* Diagnostic: warn when cursor position lands outside the active
+     * scanout.  x/y are signed -- negatives (pointer parked off the
+     * top/left edge) are normal, not OOB; only flag the right/bottom. */
+    if (bi && ((x >= 0 && (uint32)x >= gs->active_width) ||
+               (y >= 0 && (uint32)y >= gs->active_height))) {
         if (gs->stat_setspritepos - gs->cursor_oob_last_log > 50) {
-            DCHIP("SpritePos: OOB %ux%u vs active=%lux%lu bi->Mouse=%dx%d",
-                  (unsigned)x, (unsigned)y,
+            DCHIP("SpritePos: OOB %d,%d vs active=%lux%lu bi->Mouse=%dx%d",
+                  (int)x, (int)y,
                   (ULONG)gs->active_width, (ULONG)gs->active_height,
                   (int)bi->MouseX, (int)bi->MouseY);
             gs->cursor_oob_last_log = gs->stat_setspritepos;

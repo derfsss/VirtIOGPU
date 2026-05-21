@@ -69,6 +69,10 @@
  * Avoids pulling that header into every chip_*.c transitively. */
 struct PCIDevice;
 
+/* Forward declaration for the canonical AllocBitMap/FreeBitMap taglist
+ * parameter -- full struct is in <utility/tagitem.h>. */
+struct TagItem;
+
 #ifdef __GNUC__
 # ifdef __PPC__
 #  pragma pack(2)
@@ -221,31 +225,45 @@ struct ChipLine {
     ULONG  BgPen;         /* background color */
     BOOL   Horizontal;    /* TRUE if X is the long axis */
     UBYTE  DrawMode;      /* JAM1, JAM2, COMPLEMENT */
-    UBYTE  Pad;
-    UWORD  LinePtrnTotal; /* total pattern bits */
+    BYTE   pad;
+    UWORD  Xorigin;       /* pattern origin X (canonical P96 Line) */
+    UWORD  Yorigin;       /* pattern origin Y (canonical P96 Line) */
 };
 
 /* -----------------------------------------------------------------------
- * BitMapExtra -- augmented bitmap descriptor
+ * BitMapExtra -- augmented bitmap descriptor.
+ *
+ * Layout is the canonical Picasso96 P96CardDevelop SDK struct (46 bytes,
+ * pack(2)), verified identical against RadeonGCN-OS4 BoardInfo_OS4.h.
+ * An earlier reconstruction in this header conflated the 8-byte
+ * `MinNode BoardNode` with the separate `HashChain` pointer, which
+ * shifted every field from Match onward 4 bytes early -- fixed here.
+ * rtg.library owns and fills this struct; the chip never allocates it.
  * ----------------------------------------------------------------------- */
 struct BitMap;  /* forward declaration */
 struct BitMapExtra {
-    /* BoardNode (8 bytes) */
-    APTR   bn_BoardInfo;
-    APTR   bn_HashChain;
-    /* rest */
-    APTR   bme_Match;
-    struct BitMap *bme_BitMap;
-    APTR   bme_BoardInfo2;
-    APTR   bme_MemChunk;
-    struct RenderInfoChip bme_RenderInfo;  /* 12 bytes */
-    UWORD  bme_Width;
-    UWORD  bme_Height;
-    UWORD  bme_Flags;
-    UWORD  bme_BaseLevel;
-    UWORD  bme_CurrentLevel;
-    APTR   bme_CompanionMaster;
+    struct MinNode  BoardNode;            /* @0  list linkage (8 bytes)   */
+    struct BitMapExtra *HashChain;        /* @8  rtg.library hash chain   */
+    APTR            Match;                /* @12                          */
+    struct BitMap  *BitMap;               /* @16 the wrapped BitMap       */
+    struct BoardInfo *BoardInfo;          /* @20 owner board              */
+    APTR            MemChunk;             /* @24 board-memory chunk       */
+    struct RenderInfoChip RenderInfo;     /* @28 surface descriptor (12)  */
+    UWORD           Width;                /* @40                          */
+    UWORD           Height;               /* @42                          */
+    UWORD           Flags;                /* @44 BMEF_*                   */
 };
+/* sizeof(BitMapExtra) = 46 */
+
+/* BitMapExtra.Flags (BMEF_*) -- canonical Picasso96 values */
+#define BMEF_ONBOARD       0x0001
+#define BMEF_SPECIAL       0x0002
+#define BMEF_LOCKED        0x0004
+#define BMEF_VISIBLE       0x0800
+#define BMEF_DISPLAYABLE   0x1000
+#define BMEF_SPRITESAVED   0x2000
+#define BMEF_CHECKSPRITE   0x4000
+#define BMEF_INUSE         0x8000
 
 /* -----------------------------------------------------------------------
  * BoardInfo -- the central chip driver state structure.
@@ -282,7 +300,7 @@ struct BitMapExtra {
  *    192  ChipFlags
  *    194  CardFlags
  *    198  BoardNum
- *    200  RGBFormats (WORD, signed)
+ *    200  RGBFormats (UWORD)
  *    202  MaxHorValue[5]       (10 bytes)
  *    212  MaxVerValue[5]       (10 bytes)
  *    222  MaxHorResolution[5]  (10 bytes)
@@ -365,7 +383,7 @@ struct BoardInfo {
 
     /* ---- Board number and format masks ---- */
     UWORD      BoardNum;            /* @198 assigned board index           */
-    WORD       RGBFormats;          /* @200 supported RGBFF_* mask (signed)*/
+    UWORD      RGBFormats;          /* @200 supported RGBFF_* mask          */
 
     /* ---- Mode capability tables (MAXMODES=5 entries each) ---- */
     UWORD      MaxHorValue[MAXMODES];      /* @202 max bitmap width per mode  */
@@ -668,26 +686,38 @@ struct BoardInfo {
     /* [57] canonical: GetFeatureAttrs (V45+ SpecialFeature query). */
     void       (*_fp57)(void);
 
-    /* [58] AllocBitMap -- allocate RTG bitmap
-     *      APTR AllocBitMap(struct BoardInfo *bi, ...) */
-    APTR       (*AllocBitMap)(struct BoardInfo *bi, ULONG width, ULONG height,
-                              ULONG depth, RGBFTYPE format, struct BitMap *friend_bm);
+    /* [58] AllocBitMap -- allocate RTG bitmap.  Canonical Picasso96 SDK /
+     *      RadeonGCN-OS4 signature:
+     *      struct BitMap *AllocBitMap(struct BoardInfo *bi,
+     *                                 ULONG width, ULONG height,
+     *                                 struct TagItem *taglist) */
+    struct BitMap *(*AllocBitMap)(struct BoardInfo *bi, ULONG width,
+                                  ULONG height, struct TagItem *taglist);
 
-    /* [59] FreeBitMap
-     *      BOOL FreeBitMap(struct BoardInfo *bi, struct BitMapExtra *bme) */
-    BOOL       (*FreeBitMap)(struct BoardInfo *bi, struct BitMapExtra *bme);
+    /* [59] FreeBitMap -- canonical signature:
+     *      BOOL FreeBitMap(struct BoardInfo *bi, struct BitMap *bm,
+     *                      struct TagItem *taglist) */
+    BOOL       (*FreeBitMap)(struct BoardInfo *bi, struct BitMap *bm,
+                             struct TagItem *taglist);
 
-    /* [60] GetBitMapAttr
-     *      ULONG GetBitMapAttr(struct BoardInfo *bi, struct BitMapExtra *bme, ULONG attr) */
-    ULONG      (*GetBitMapAttr)(struct BoardInfo *bi, struct BitMapExtra *bme, ULONG attr);
+    /* [60] GetBitMapAttr -- canonical signature:
+     *      ULONG GetBitMapAttr(struct BoardInfo *bi, struct BitMap *bm,
+     *                          ULONG attr) */
+    ULONG      (*GetBitMapAttr)(struct BoardInfo *bi, struct BitMap *bm,
+                                ULONG attr);
 
     /* [61] SetSprite -- enable/disable hardware cursor
      *      BOOL SetSprite(struct BoardInfo *bi, BOOL activate, RGBFTYPE format) */
     BOOL       (*SetSprite)(struct BoardInfo *bi, BOOL activate, RGBFTYPE format);
 
-    /* [62] SetSpritePosition -- move hardware cursor
-     *      void SetSpritePosition(struct BoardInfo *bi, UWORD x, UWORD y, RGBFTYPE format) */
-    void       (*SetSpritePosition)(struct BoardInfo *bi, UWORD x, UWORD y,
+    /* [62] SetSpritePosition -- move hardware cursor.
+     *      x/y are SIGNED (WORD) -- the canonical Picasso96 SDK /
+     *      RadeonGCN-OS4 signature.  graphics.library passes negative
+     *      coordinates when the pointer parks off the top/left edge;
+     *      declaring these UWORD mis-handles the sign and propagates a
+     *      ~4-billion value into the VirtIO cursor command.
+     *      void SetSpritePosition(struct BoardInfo *bi, WORD x, WORD y, RGBFTYPE format) */
+    void       (*SetSpritePosition)(struct BoardInfo *bi, WORD x, WORD y,
                                    RGBFTYPE format);
 
     /* [63] SetSpriteImage -- upload cursor pixels

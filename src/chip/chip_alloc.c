@@ -206,47 +206,18 @@ out:
 }
 
 /* -----------------------------------------------------------------------
- * chip_AllocBitMap / chip_FreeBitMap -- BoardInfo vtable callbacks.
- * (Slots 58/59.)  rtg.library invokes these on AllocBitMapTagList /
- * FreeBitMap.  Returns raw pixel memory; rtg.library wraps a BitMap
- * struct around it.  See chip_GetBitMapAttr below for the BMA_*
- * attribute query path used after construction.
+ * BoardInfo vtable slots 58/59/60 (AllocBitMap / FreeBitMap /
+ * GetBitMapAttr) are intentionally NOT implemented.
+ *
+ * An ABI probe (v53.154) confirmed AOS4 rtg.library never invokes these
+ * slots during normal Workbench use -- it allocates and manages RTG
+ * bitmaps itself.  Per joerg (amigans.net): "nearly all BoardInfo
+ * functions can be set to NULL on AmigaOS 4.x and a fallback function
+ * in graphics.library is used instead."  The slots are left NULL in
+ * chip_alloc_fill_vtable so graphics.library's fallback handles them.
+ * The canonical signatures are still declared in boardinfo.h.
+ * AllocCardMem / FreeCardMem (slots 0/1) ARE used and stay implemented.
  * ----------------------------------------------------------------------- */
-static APTR chip_AllocBitMap(struct BoardInfo *bi, ULONG width, ULONG height,
-                              ULONG depth, RGBFTYPE format, struct BitMap *friend_bm)
-{
-    (void)bi; (void)friend_bm;
-    struct ChipGPUState *gs = g_chip_state;
-    if (!gs || !gs->board_mem) return NULL;
-
-    UWORD bpp = chip_format_bpp(format);
-    ULONG size = (ULONG)width * bpp * height;
-
-    DCHIP_V("AllocBitMap(w=%lu h=%lu d=%lu fmt=%ld) bpp=%u size=%lu offset=%lu/%lu",
-            width, height, depth, (LONG)format, (unsigned)bpp, size,
-            gs->board_alloc_offset, gs->board_mem_size);
-
-    APTR result = board_alloc(gs, size);
-    if (result)
-        DCHIP_V("AllocBitMap -> %p (next_offset=%lu)", result, gs->board_alloc_offset);
-    else
-        DCHIP("AllocBitMap: FAILED (w=%lu h=%lu size=%lu free=%lu)",
-              width, height, size, gs->board_mem_size - gs->board_alloc_offset);
-    return result;
-}
-
-static BOOL chip_FreeBitMap(struct BoardInfo *bi, struct BitMapExtra *bme)
-{
-    (void)bi;
-    if (!bme) return TRUE;
-    /* BitMapExtra offset 0 is the pointer we returned from chip_AllocBitMap. */
-    APTR mem = *(APTR *)bme;
-    if (mem) {
-        DCHIP_V("FreeBitMap: bme=%p mem=%p", bme, mem);
-        board_free(g_chip_state, mem);
-    }
-    return TRUE;
-}
 
 static APTR chip_AllocCardMem(struct BoardInfo *bi, ULONG size, BOOL visible, BOOL display)
 {
@@ -271,65 +242,18 @@ static BOOL chip_FreeCardMem(struct BoardInfo *bi, APTR mem)
 }
 
 /* -----------------------------------------------------------------------
- * chip_GetBitMapAttr -- vtable slot 60.
+ * chip_alloc_fill_vtable -- wire the allocator callbacks into BoardInfo.
+ * Called from chip_fill_boardinfo_vtable in chip_p96.c.
  *
- * BMA_* enumeration is graphics.library V54's bitmap-attribute query
- * surface; values match the P96 RGBFB_* / PIXF_* enums by design.
- * Apps using IGraphics->GetBitMapAttr(bm, BMA_PIXELFORMAT) etc. land
- * here once rtg.library has identified the bitmap as ours.
- * ----------------------------------------------------------------------- */
-static ULONG chip_GetBitMapAttr(struct BoardInfo *bi, struct BitMapExtra *bme,
-                                 ULONG attr)
-{
-    (void)bi;
-    if (!bme) {
-        DCHIP("GetBitMapAttr: bme NULL (attr=%lu) -- returning 0", attr);
-        return 0;
-    }
-
-    UWORD bpp = chip_format_bpp(bme->bme_RenderInfo.RGBFormat);
-
-    switch (attr) {
-    case BMA_WIDTH:         return (ULONG)bme->bme_Width;
-    case BMA_HEIGHT:        return (ULONG)bme->bme_Height;
-    case BMA_DEPTH:         return (ULONG)(bpp * 8);
-    case BMA_ISRTG:         return TRUE;
-    case BMA_BYTESPERPIXEL: return (ULONG)bpp;
-    case BMA_BITSPERPIXEL:  return (ULONG)(bpp * 8);
-    case BMA_PIXELFORMAT:   return (ULONG)bme->bme_RenderInfo.RGBFormat;
-    case BMA_ACTUALWIDTH:   return (ULONG)bme->bme_Width;
-    case BMA_BASEADDRESS:   return (ULONG)bme->bme_RenderInfo.Memory;
-    case BMA_BYTESPERROW:   return (ULONG)bme->bme_RenderInfo.BytesPerRow;
-    default: {
-        /* Unknown BMA_* attribute -- log once per distinct value so we
-         * see what AOS4 asks for that we don't yet handle.  Cap at 16
-         * distinct attrs to bound the log. */
-        static volatile uint32 bma_warned[16];
-        BOOL seen = FALSE;
-        for (int i = 0; i < 16; i++)
-            if (bma_warned[i] == attr) { seen = TRUE; break; }
-        if (!seen) {
-            for (int i = 0; i < 16; i++) {
-                if (bma_warned[i] == 0) { bma_warned[i] = attr; break; }
-            }
-            DCHIP("GetBitMapAttr: unknown BMA attr=0x%lx -- returning 0",
-                  attr);
-        }
-        return 0;
-    }
-    }
-}
-
-/* -----------------------------------------------------------------------
- * chip_alloc_fill_vtable -- wire the four allocator callbacks +
- * GetBitMapAttr into the BoardInfo vtable.  Called from
- * chip_fill_boardinfo_vtable in chip_p96.c.
+ * AllocCardMem / FreeCardMem (slots 0/1) are implemented.  AllocBitMap /
+ * FreeBitMap / GetBitMapAttr (slots 58/59/60) are left NULL so
+ * graphics.library's fallback handles them -- see the note above.
  * ----------------------------------------------------------------------- */
 void chip_alloc_fill_vtable(struct BoardInfo *bi)
 {
     bi->AllocCardMem  = chip_AllocCardMem;
     bi->FreeCardMem   = chip_FreeCardMem;
-    bi->AllocBitMap   = chip_AllocBitMap;
-    bi->FreeBitMap    = chip_FreeBitMap;
-    bi->GetBitMapAttr = chip_GetBitMapAttr;
+    bi->AllocBitMap   = NULL;
+    bi->FreeBitMap    = NULL;
+    bi->GetBitMapAttr = NULL;
 }

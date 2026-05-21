@@ -845,7 +845,7 @@ BOOL chip_GetEDID(struct ChipGPUState *gs, uint32 scanout);
 void chip_handle_display_change(struct ChipGPUState *gs);
 BOOL chip_CursorCreate(struct ChipGPUState *gs);
 void chip_CursorUpdate(struct ChipGPUState *gs, uint32 hot_x, uint32 hot_y);
-void chip_CursorMove(struct ChipGPUState *gs, uint32 x, uint32 y);
+void chip_CursorMove(struct ChipGPUState *gs, WORD x, WORD y);
 void chip_CursorHide(struct ChipGPUState *gs);
 
 /* chip_gpu_3d.c */

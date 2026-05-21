@@ -1459,7 +1459,7 @@ BOOL chip_InitCard_C(struct BoardInfo *bi, char **toolTypes, APTR cardDesc)
     /* Format support -- A8R8G8B8 is the native AmigaOS 4 32bpp format.
      * GPU resource uses X8R8G8B8_UNORM which has identical byte layout
      * on PPC BE, so A8R8G8B8 data passes through with zero conversion. */
-    bi->RGBFormats    = (WORD)(RGBFF_CLUT | RGBFF_R5G6B5 | RGBFF_A8R8G8B8);
+    bi->RGBFormats    = (UWORD)(RGBFF_CLUT | RGBFF_R5G6B5 | RGBFF_A8R8G8B8);
     bi->BitsPerCannon = 8;
     bi->RGBFormat     = RGBFB_A8R8G8B8;
     bi->Depth         = 32;

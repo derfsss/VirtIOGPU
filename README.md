@@ -55,12 +55,10 @@ or, for Virgl GPU acceleration:
 The Pegasos2 MV64361 bridge transparently maps PCI BAR addresses into the
 CPU address space, allowing direct MMIO access via `lwbrx`/`stwbrx`.
 
-**Future targets (not yet supported):**
+**Future QEMU targets (not yet supported):**
 
-- **AmigaOne (Articia S)** — direct MMIO to PCI BARs does not work on this
-  bridge. A PCI config-space fallback (VirtIO spec §4.1.4.7) is scaffolded
-  in the driver but disabled, pending a QEMU `-M amigaone` fix.
-- **Sam460** — planned; not yet brought up.
+- **AmigaOne**
+- **Sam460** 
 
 On any non-Pegasos2 machine the driver currently fails cleanly at init with
 a diagnostic message rather than crashing.
@@ -155,11 +153,9 @@ hooks, so no separate device is needed.
 
 ### Key constraints
 
-- **Chip uses `-mcrt=newlib`** — required for AmigaOS library/interface
-  infrastructure (CLT processing, `GetInterface`).
+- **Chip uses `-mcrt=newlib`** 
 - **Modern VirtIO only** — PCI device ID `0x1050`; no legacy transport.
-- **MMIO via `stwbrx` / `lwbrx`** — byte-reversed PPC load/store
-  (Pegasos2 MV64361 bridge).
+- **MMIO via `stwbrx` / `lwbrx`**
 - **Two virtqueues** — queue 0 (control), queue 1 (cursor).
 
 ---

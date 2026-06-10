@@ -51,35 +51,48 @@ from installergen import (
 from installergen.model import Handler
 
 
+# NOTE: the Installation Utility's page text is PLAIN TEXT only --
+# ReAction/console style escapes ("\033b" bold etc.) are not
+# interpreted (verified live: the ESC byte is dropped and the letter
+# renders literally).  Formatting is therefore typographic, following
+# the conventions of Hyperion's own Update installers: leading blank
+# line, paragraph spacing, indented numbered steps, quoted file and
+# button names, and an explicit navigation cue at the end.
 locale = [
     LocaleString(
         "MSG_WELCOME",
-        "Welcome to the VirtIOGPU chip driver installer.\n\n"
-        "virtiogpu.chip is a Picasso96 RTG driver for the VirtIO GPU "
-        "exposed by QEMU (-device virtio-gpu-pci).  It is for AmigaOS "
-        "4.1 Final Edition systems running inside QEMU; it does nothing "
-        "useful on real hardware.\n\n"
-        "This installer will:\n"
-        "1. Copy virtiogpu.chip to SYS:Kickstart/\n"
-        "2. Add it to SYS:Kickstart/Kicklayout before PCIGraphics.card\n"
-        "   (a backup is saved as Kicklayout.bak)\n\n"
-        "A reboot is required afterwards to load the new Kickstart "
-        "module."),
+        "\nWelcome to the installation of the VirtIOGPU graphics "
+        "driver.\n\n"
+        "virtiogpu.chip is a Picasso96 (RTG) graphics driver for the "
+        "VirtIO GPU device provided by the QEMU emulator.  It is "
+        "intended for AmigaOS 4.1 Final Edition systems running inside "
+        "QEMU and serves no purpose on real hardware.\n\n"
+        "The following changes will be made to your system:\n\n"
+        "    1.  virtiogpu.chip will be copied to \"SYS:Kickstart\"\n\n"
+        "    2.  \"SYS:Kickstart/Kicklayout\" will be updated to load "
+        "the driver during startup; the previous configuration will be "
+        "preserved as \"Kicklayout.bak\"\n\n"
+        "A system restart is required to complete the installation.\n\n\n"
+        "Press \"Next\" to continue."),
     LocaleString(
         "MSG_FINISH",
-        "virtiogpu.chip has been installed.\n\n"
-        "SYS:Kickstart/Kicklayout was updated (the previous version was "
-        "saved as Kicklayout.bak).  The driver loads on the next reboot; "
-        "make sure QEMU is started with a VirtIO GPU device:\n\n"
+        "\nThe installation completed successfully.\n\n"
+        "virtiogpu.chip has been copied to \"SYS:Kickstart\" and "
+        "\"SYS:Kickstart/Kicklayout\" has been updated.  The previous "
+        "configuration was preserved as \"Kicklayout.bak\".  The driver "
+        "will be activated by the next system restart.\n\n"
+        "Please ensure QEMU is started with a VirtIO GPU display "
+        "device:\n\n"
         "    -device virtio-gpu-pci\n\n"
         "or, for Virgl GPU acceleration:\n\n"
         "    -device virtio-gpu-gl-pci -display sdl,gl=on\n\n"
-        "Note: under QEMU the reboot below may power the virtual "
-        "machine off instead of restarting it (verified on the amigaone "
-        "machine) -- simply start QEMU again."),
+        "Please note: when restarting from within QEMU, the virtual "
+        "machine may power off instead of restarting.  Should this "
+        "occur, simply start QEMU again.\n\n\n"
+        "Press \"Finish\" to exit the installation."),
     LocaleString(
         "MSG_REBOOT",
-        "Reboot now (required to activate the new Kickstart module)"),
+        "Restart the system now (required to activate the driver)"),
 ]
 
 

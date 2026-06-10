@@ -542,8 +542,8 @@ static void chip_FillRect(struct BoardInfo *bi, struct RenderInfoChip *ri,
     uint32 prof_t0 = chip_prof_begin(g_chip_state);
 
     if (format == RGBFB_CLUT) {
-        /* 8bpp: every byte is the same value -- use memset, which on
-         * PPC reduces to long-word stb-broadcast loops in newlib. */
+        /* 8bpp: every byte is the same value -- long-word broadcast
+         * fill (chip_fill_rect_bytes). */
         chip_fill_rect_bytes(base, stride, (ULONG)w, h, (UBYTE)color);
     } else if (bpp == 2) {
         UWORD c16 = (UWORD)color;

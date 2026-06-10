@@ -294,7 +294,7 @@ void chip_register_modes(struct ChipGPUState *gs)
  * registered in graphics.library DisplayInfoBase.  RTG modes from this
  * chip use MONITOR_ID 0x0005 (high 16 bits of DisplayID); standard Amiga
  * monitors use PAL=0x0002, NTSC=0x0001, VGA=0x0031, MULTISCAN=0x000A.
- * Anything we don't own came from DEVS:Monitors/* files loaded at startup.
+ * Anything we don't own came from DEVS:Monitors files loaded at startup.
  *
  * Must be called *after* the system is up (e.g. first SetSwitch(TRUE));
  * during chip_InitCard_C the database isn't fully populated yet.

@@ -158,10 +158,14 @@ int32 VirtQueue_AddBuf(struct ExecIFace *IExec, struct virtqueue *vq, struct vri
                                 AVT_ClearWithValue, 0, AVT_Type, MEMF_SHARED, TAG_DONE);
 
         if (itbl) {
+            /* Indirect-table entries are device-visible vring descriptors:
+             * apply the same modern/legacy endian handling as the main
+             * descriptor table. */
             for (n = 0; n < total; n++) {
-                itbl[n].addr  = (uint64)sg[n].addr;
-                itbl[n].len   = sg[n].len;
-                itbl[n].flags = (n >= out_num) ? VRING_DESC_F_WRITE : 0;
+                itbl[n].addr  = vr64(vq->modern, (uint64)sg[n].addr);
+                itbl[n].len   = vr32(vq->modern, sg[n].len);
+                itbl[n].flags = vr16(vq->modern,
+                                     (n >= out_num) ? VRING_DESC_F_WRITE : 0);
                 itbl[n].next  = 0;
             }
 
@@ -175,20 +179,25 @@ int32 VirtQueue_AddBuf(struct ExecIFace *IExec, struct virtqueue *vq, struct vri
                     uint32 itbl_phys = (uint32)itbl_dma[0].PhysicalAddress;
                     IExec->FreeSysObject(ASOT_DMAENTRY, itbl_dma);
 
-                    vq->desc[head].addr  = (uint64)itbl_phys;
-                    vq->desc[head].len   = itbl_size;
-                    vq->desc[head].flags = VRING_DESC_F_INDIRECT;
+                    /* Save the free-chain link BEFORE overwriting .next --
+                     * the old code read .next back after zeroing it, which
+                     * pinned free_head to 0 and corrupted the free list. */
+                    uint16 next_free = vq->desc[head].next;
+
+                    vq->desc[head].addr  = vr64(vq->modern, (uint64)itbl_phys);
+                    vq->desc[head].len   = vr32(vq->modern, itbl_size);
+                    vq->desc[head].flags = vr16(vq->modern, VRING_DESC_F_INDIRECT);
                     vq->desc[head].next  = 0;
-                    vq->free_head = vq->desc[head].next;
+                    vq->free_head = next_free;
                     vq->num_free -= 1;
 
                     vq->cookies[head] = cookie;
                     vq->indirect_tables[head] = (void *)itbl;
 
-                    uint16 avail_idx = vq->avail->idx;
-                    vq->avail->ring[avail_idx % vq->num] = head;
+                    uint16 avail_idx = vr16(vq->modern, vq->avail->idx);
+                    vq->avail->ring[avail_idx % vq->num] = vr16(vq->modern, head);
                     __asm__ volatile("eieio" ::: "memory");
-                    vq->avail->idx = avail_idx + 1;
+                    vq->avail->idx = vr16(vq->modern, (uint16)(avail_idx + 1));
                     return 0;
                 }
                 IExec->EndDMA(itbl, itbl_size, DMA_ReadFromRAM | DMAF_NoModify);
@@ -250,6 +259,16 @@ void *VirtQueue_GetBuf(struct ExecIFace *IExec, struct virtqueue *vq, uint32 *le
     uint16 used_slot = vq->last_used_idx % vq->num;
     uint32 desc_id = vr32(vq->modern, vq->used->ring[used_slot].id);
     uint32 written = vr32(vq->modern, vq->used->ring[used_slot].len);
+
+    /* Sanity: a used-ring id past the descriptor count would index the
+     * cookie/indirect arrays out of bounds.  Should never happen with a
+     * conforming device; skip the entry rather than corrupt memory. */
+    if (desc_id >= vq->num) {
+        DPRINTF(IExec, "[virtio] VQ%lu: bogus used id %lu (num=%lu)\n",
+                vq->index, desc_id, vq->num);
+        vq->last_used_idx++;
+        return NULL;
+    }
 
     if (len_out)
         *len_out = written;

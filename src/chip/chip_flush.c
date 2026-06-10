@@ -391,12 +391,21 @@ void chip_flush(WORD x, WORD y, UWORD w, UWORD h)
     uint32 max_w = gs->active_width  < gs->fb_width  ? gs->active_width  : gs->fb_width;
     uint32 max_h = gs->active_height < gs->fb_height ? gs->active_height : gs->fb_height;
 
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if ((ULONG)x >= max_w || (ULONG)y >= max_h || w == 0 || h == 0)
+    /* Clip to [0, max) in signed 32-bit space.  The previous UWORD-based
+     * clamp wrapped when a rect lay entirely off-screen left/top
+     * (w += negative x underflowed to ~65k and got re-clamped to a
+     * full-width flush instead of being skipped). */
+    LONG x0 = x, y0 = y;
+    LONG x1 = (LONG)x + (LONG)w;
+    LONG y1 = (LONG)y + (LONG)h;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (LONG)max_w) x1 = (LONG)max_w;
+    if (y1 > (LONG)max_h) y1 = (LONG)max_h;
+    if (x0 >= x1 || y0 >= y1)
         return;
-    if ((ULONG)(x + w) > max_w)  w = (UWORD)(max_w - (ULONG)x);
-    if ((ULONG)(y + h) > max_h) h = (UWORD)(max_h - (ULONG)y);
+    x = (WORD)x0;          y = (WORD)y0;
+    w = (UWORD)(x1 - x0);  h = (UWORD)(y1 - y0);
 
     /* Wake the flush task immediately -- replaces the legacy activity_counter
      * polling mechanism.  In double-buffer mode this is the only thing

@@ -14,8 +14,8 @@ resolution detection, dynamic mode switching, and Virgl 2D/3D GPU
 acceleration.
 
 The current aim is to get the driver fully working on the **QEMU Pegasos2**
-machine before leaving beta. **AmigaOne** and **Sam460** QEMU machines are
-planned future targets (see [Platform](#platform) below).
+machine before leaving beta. The **QEMU AmigaOne** machine also works
+(see [Platform](#platform) below); **Sam460** is a planned future target.
 
 ---
 
@@ -55,13 +55,26 @@ or, for Virgl GPU acceleration:
 The Pegasos2 MV64361 bridge transparently maps PCI BAR addresses into the
 CPU address space, allowing direct MMIO access via `lwbrx`/`stwbrx`.
 
+**QEMU AmigaOne** also works:
+
+```
+-M amigaone -device virtio-gpu-pci
+```
+
+AmigaOS's AmigaOne PCI enumeration leaves the high dword of 64-bit BARs
+unprogrammed (the "AmigaOne PCI probe bug"); the driver repairs the BAR
+before its scan, after which direct MMIO works and the full init
+succeeds.  Verified: 1280x800 Workbench on `-M amigaone`.  Note this
+applies to the QEMU machine only — real Articia S silicon does not
+forward PCI MMIO, so real-hardware support would need the scaffolded
+PCI_CFG fallback (untested).
+
 **Future QEMU targets (not yet supported):**
 
-- **AmigaOne**
-- **Sam460** 
+- **Sam460**
 
-On any non-Pegasos2 machine the driver currently fails cleanly at init with
-a diagnostic message rather than crashing.
+On an unsupported machine the driver fails cleanly at init with a
+diagnostic message rather than crashing.
 
 ---
 

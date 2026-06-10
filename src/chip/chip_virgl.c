@@ -234,10 +234,12 @@ void virgl_cmd_create_shader(struct VirglCmdBuf *cbuf, uint32 handle,
     DCHIP("CREATE_SHADER h=%lu type=%lu len=%lu tlen=%lu tw=%lu start=%lu end=%lu",
           handle, shader_type, payload_len, text_len, text_words,
           start_pos, cbuf->dwords);
-    DCHIP("  buf[0..5]=%08lx %08lx %08lx %08lx %08lx %08lx",
-          cbuf->buf[start_pos+0], cbuf->buf[start_pos+1],
-          cbuf->buf[start_pos+2], cbuf->buf[start_pos+3],
-          cbuf->buf[start_pos+4], cbuf->buf[start_pos+5]);
+    if (cbuf->dwords >= start_pos + 6) {
+        DCHIP("  buf[0..5]=%08lx %08lx %08lx %08lx %08lx %08lx",
+              cbuf->buf[start_pos+0], cbuf->buf[start_pos+1],
+              cbuf->buf[start_pos+2], cbuf->buf[start_pos+3],
+              cbuf->buf[start_pos+4], cbuf->buf[start_pos+5]);
+    }
 }
 
 /* -----------------------------------------------------------------------

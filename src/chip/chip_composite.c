@@ -675,6 +675,16 @@ uint32 chip_virgl_composite(struct ChipGPUState *gs,
             has_alpha = FALSE;
         }
 
+        /* Validate the sub-region before forming the pointer: negative
+         * offsets or degenerate sizes from a buggy COMPTAG_* caller would
+         * otherwise wrap the pointer arithmetic far outside the source
+         * bitmap.  Software fallback is the safe answer. */
+        if (src_x < 0 || src_y < 0 || src_w <= 0 || src_h <= 0) {
+            DCHIP("composite: bad src region (%ld,%ld %ldx%ld) -- SW fallback",
+                  (long)src_x, (long)src_y, (long)src_w, (long)src_h);
+            return COMPERR_SoftwareFallback;
+        }
+
         /* Calculate pointer to source sub-region */
         const uint8 *src_base = (const uint8 *)src_data;
         const void *src_region = src_base + src_y * src_bpr + src_x * 4;

@@ -590,7 +590,9 @@ static const struct TagItem mgl_manager_tags[] = {
  * ----------------------------------------------------------------------- */
 static uint32 mgl_main_Obtain(struct Interface *Self)
 {
-    return Self->Data.RefCount++;
+    /* Pre-increment: Obtain returns the NEW reference count (>= 1),
+     * matching Release's pre-decrement and the exec convention. */
+    return ++Self->Data.RefCount;
 }
 
 static uint32 mgl_main_Release(struct Interface *Self)

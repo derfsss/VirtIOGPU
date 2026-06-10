@@ -1482,15 +1482,30 @@ BOOL chip_InitCard_C(struct BoardInfo *bi, char **toolTypes, APTR cardDesc)
      */
     bi->Flags         = BIF_GRANTDIRECTACCESS | BIF_NOMASKBLITS | BIF_NOC2PBLITS
                       | BIF_INDISPLAYCHAIN | BIF_HARDWARESPRITE
-                      | BIF_HASSPRITEBUFFER | BIF_VBLANKINTERRUPT;
-    /* HASSPRITEBUFFER: VirtIO cursor plane is a permanent 64x64 ARGB
-     * resource on the GPU, completely independent of the framebuffer.
-     * Setting this tells rtg.library not to allocate a host-side save
-     * buffer (MouseSaveBuffer) -- there is nothing to save/restore
-     * since the cursor never paints into our backing memory. */
-    /* SoftSpriteFlags = 0: hardware cursor for all formats.  VirtIO GPU cursor
-     * plane is format-independent (always 64x64 B8G8R8A8). */
-    bi->SoftSpriteFlags = 0;
+                      | BIF_VBLANKINTERRUPT;
+    /* SoftSpriteFlags = all supported formats: force the OS-drawn SOFT
+     * sprite everywhere.
+     *
+     * The VirtIO hardware cursor plane is rendered by the HOST (QEMU
+     * SDL draws the guest-defined image at the HOST pointer position),
+     * while button clicks land at the position AmigaOS integrates from
+     * raw PS/2 deltas -- with Input-prefs mouse acceleration the two
+     * positions drift apart, so the cursor LOOKS right but clicks miss
+     * gadgets (user-reported: select boxes offset from the pointer,
+     * close gadget unclickable).  A soft sprite is drawn by
+     * graphics.library into the framebuffer at the OS's own logical
+     * position, so rendering and click position can never disagree.
+     *
+     * BIF_HASSPRITEBUFFER is intentionally NOT set any more: with the
+     * soft sprite, rtg.library needs its MouseSaveBuffer for the
+     * under-cursor save/restore blits.
+     *
+     * The VirtIO cursor-plane code (chip_SetSprite*, chip_Cursor*) is
+     * kept wired; P96 will not call it while every format is in
+     * SoftSpriteFlags.  Revert to the hardware plane by zeroing this
+     * field -- only sensible for display frontends that composite the
+     * cursor plane at GUEST coordinates (not QEMU SDL/GTK). */
+    bi->SoftSpriteFlags = (UWORD)(RGBFF_CLUT | RGBFF_R5G6B5 | RGBFF_A8R8G8B8);
     bi->ChipFlags       = 0;
     bi->CardFlags       = 0;
 

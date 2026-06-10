@@ -1856,6 +1856,78 @@ honours it.
 
 ---
 
+## v53.160 -- 10.06.2026
+
+**P96 code review vs ATIRadeon decompile: screen-drag black fix +
+cursor coordinate contract**
+
+Review driven by two user-reported bugs, validated against the
+known-working ATIRadeon.chip clean-room decompile
+(`Projects/Decompile/ATIRadeon`) and live tracing on QEMU amigaone.
+
+### Screen dragging turned the whole display black (FIXED)
+
+Root cause found by tracing the drag with per-op render logging:
+when a screen is dragged, AOS4 graphics.library allocates a
+full-screen scratch bitmap, fills the revealed strip black through
+`FillRect`, copies the dragged screen's content into the scratch
+through `BlitRectNoMaskComplete` **with opcode 0x0C**, and pans the
+display to the scratch.  Our NMC decoded the opcode as a BltBitMap
+minterm byte (`rop = opcode >> 4`), which turned 0x0C (= the 4-bit
+logic-op VALUE for SrcCopy, the form ATIRadeon programs directly into
+its rop register as `opcode & 0xf`) into 0x0 = Clear -- the content
+copy painted black, so the whole dragged display was black.  The
+decode now accepts both conventions: values > 0x0F are minterm bytes
+(op = high nibble), values <= 0x0F are the op itself.  Verified
+live: drag down shows black strip above + intact Workbench below;
+drag back restores cleanly.
+
+### Cursor / panned-origin contract (ATIRadeon-faithful)
+
+- `chip_SetPanning` now records `bi->XOffset/YOffset` (canonical
+  contract; ATIRadeon `cb_SetPanning` does exactly this).
+- `chip_SetSpritePosition` ported to ATIRadeon semantics: subtracts
+  the panned origin, clamps to the current `ModeInfo` dimensions (a
+  stale position from a larger previous mode can no longer park the
+  VirtIO cursor outside the visible mode -- the "cursor thinks the
+  screen is a different resolution" symptom), and pushes
+  `MOVE_CURSOR` on every position change (the historical flicker came
+  from per-move image re-definition, not from MOVE_CURSOR; the
+  one-shot post-SetGC refresh hack is gone).
+- `chip_SetSpriteImage` applies the same transform so the two paths
+  agree.
+- Doublescan y-doubling from ATIRadeon deliberately NOT replicated
+  (no VirtIOGPU mode sets GMF_DOUBLESCAN).
+
+### Diagnostics
+
+- New host-side tools (not in `make all`): `src/tools/mempeek.c`
+  (summarise/dump a guest memory range from a shell) and
+  `src/tools/draginput.c` (inject a scripted title-bar drag through
+  input.device -- works when host-side QMP input is unavailable).
+- Cursor logs (`MOVE_CURSOR`, `UPDATE_CURSOR`, `SpriteImage`) demoted
+  to `DCHIP_V`: they now fire per pointer move / busy-pointer frame.
+
+### Investigation notes
+
+- AOS4 does NOT use SetSplitPosition, a YSplit BoardInfo field, or
+  any split mechanism for screen dragging -- full composition into a
+  scratch bitmap + SetPanning.  BoardInfo diff during a live drag
+  shows only the Mouse fields changing.
+- graphics.library brackets the pan with SetInterrupt(FALSE/TRUE)
+  when `BIF_VBLANKINTERRUPT` is set, and runs a sprite-save-buffer
+  blit path (CalculateMemory + buffer blit + WaitBlitter) when
+  `BIF_HASSPRITEBUFFER` is set.
+- QEMU `-device loader,file=` reads the kickstart image ONCE at
+  process start: `system_reset` re-deploys the stale bytes.  Inject a
+  new chip => full QEMU restart, not reset.
+- The Makefile has no header dependencies: after touching
+  `chip_state.h`, `make all` without `make clean` links objects with
+  mismatched struct layouts (boots stall in graphics init).  Always
+  clean-build after header changes.
+
+---
+
 ## Planned releases
 
 | Version | Phase | Objective |

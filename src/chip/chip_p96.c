@@ -449,9 +449,17 @@ static void chip_SetGC(struct BoardInfo *bi, struct ModeInfo *mi, BOOL border)
 static void chip_SetPanning(struct BoardInfo *bi, APTR mem, UWORD width,
                              WORD xOff, WORD yOff, RGBFTYPE format)
 {
-    (void)bi;
     DCHIP_V("SetPanning(mem=%p width=%u xOff=%d yOff=%d fmt=%ld)",
             mem, (unsigned)width, (int)xOff, (int)yOff, (LONG)format);
+
+    /* Canonical P96 contract (ATIRadeon cb_SetPanning does exactly
+     * this): record the panned origin in BoardInfo.  SetSpritePosition
+     * coordinates are relative to this origin and subtract it back. */
+    if (bi) {
+        bi->XOffset = xOff;
+        bi->YOffset = yOff;
+    }
+
     if (g_chip_state) g_chip_state->stat_setpanning++;
     if (g_chip_state && mem) {
         struct ChipGPUState *gs = g_chip_state;
@@ -831,37 +839,66 @@ static void chip_SetSpritePosition(struct BoardInfo *bi, WORD x, WORD y,
     if (!gs) return;
     gs->stat_setspritepos++;
 
-    gs->cursor_x = x;
-    gs->cursor_y = y;
+    /* Canonical P96 semantics, ported from the known-working
+     * ATIRadeon.chip cb_SetSpritePosition: the incoming coordinates
+     * are relative to the PANNED ORIGIN -- subtract bi->XOffset /
+     * bi->YOffset (set by SetPanning) -- and clamp to the current
+     * ModeInfo so a stale position from a larger previous mode can
+     * never park the cursor outside the visible mode (the "cursor
+     * thinks the screen is a different resolution" symptom after a
+     * mode switch).  ATIRadeon also doubles y for doublescan modes
+     * (ModeInfo Flags bit 2); none of our modes set GMF_DOUBLESCAN,
+     * and the VirtIO scanout is never line-doubled, so that part is
+     * deliberately not replicated. */
+    WORD vx = x;
+    WORD vy = y;
+    if (bi) {
+        vx = (WORD)(x - bi->XOffset);
+        vy = (WORD)(y - bi->YOffset);
+        struct ModeInfo *mi = bi->ModeInfo;
+        if (mi) {
+            if (vx > (WORD)mi->Width)  vx = (WORD)mi->Width;
+            if (vy > (WORD)mi->Height) vy = (WORD)mi->Height;
+        }
+        WORD min_x = (WORD)(1 - bi->MouseWidth);
+        WORD min_y = (WORD)(1 - bi->MouseHeight);
+        if (vx < min_x) vx = min_x;
+        if (vy < min_y) vy = min_y;
+    }
 
-    /* One-shot MOVE_CURSOR after a SetGC mode change.  AmigaOS rescales
-     * its internal mouse coords to the new screen size (e.g.
-     * 967x676/1600x1200 -> 791x468/1280x800), but on shrink no
-     * SetSpriteImage follows -- so without this push, the VirtIO
-     * cursor texture stays at the pre-resize position until the user
-     * triggers an image change (right-click, hover, etc.).  Sending
-     * MOVE_CURSOR exactly once per SetGC keeps the cursor texture
-     * aligned with what AmigaOS thinks the position is, without the
-     * per-move flicker that previous always-MOVE_CURSOR attempts hit. */
+    gs->cursor_x = vx;
+    gs->cursor_y = vy;
+
+    /* Do NOT send MOVE_CURSOR on every position change.  QEMU display
+     * backends with host-cursor support (SDL) render the guest cursor
+     * image at the HOST pointer position and treat a guest MOVE_CURSOR
+     * as a request to WARP the host pointer -- a per-move stream makes
+     * the cursor fight the user's hand (teleporting between the host
+     * position and the guest's PS/2-integrated position, with a size
+     * pop where plane and host-cursor scaling differ; user-confirmed
+     * regression 2026-06-10).  The host draws the cursor at the right
+     * place without our help on those backends; the plane position
+     * only matters after a mode change, handled by the one-shot
+     * refresh below. */
     if (gs->cursor_needs_refresh && gs->cursor_created &&
-        (x != gs->cursor_last_sent_x || y != gs->cursor_last_sent_y))
+        (vx != gs->cursor_last_sent_x || vy != gs->cursor_last_sent_y))
     {
-        chip_CursorMove(gs, x, y);
-        gs->cursor_last_sent_x = x;
-        gs->cursor_last_sent_y = y;
+        chip_CursorMove(gs, vx, vy);
+        gs->cursor_last_sent_x = vx;
+        gs->cursor_last_sent_y = vy;
         gs->cursor_needs_refresh = FALSE;
         DCHIP("SpritePos: post-SetGC refresh -- MOVE_CURSOR(%d,%d)",
-              (int)x, (int)y);
+              (int)vx, (int)vy);
     }
 
     /* Diagnostic: warn when cursor position lands outside the active
-     * scanout.  x/y are signed -- negatives (pointer parked off the
+     * scanout.  vx/vy are signed -- negatives (pointer parked off the
      * top/left edge) are normal, not OOB; only flag the right/bottom. */
-    if (bi && ((x >= 0 && (uint32)x >= gs->active_width) ||
-               (y >= 0 && (uint32)y >= gs->active_height))) {
+    if (bi && ((vx >= 0 && (uint32)vx >= gs->active_width) ||
+               (vy >= 0 && (uint32)vy >= gs->active_height))) {
         if (gs->stat_setspritepos - gs->cursor_oob_last_log > 50) {
             DCHIP("SpritePos: OOB %d,%d vs active=%lux%lu bi->Mouse=%dx%d",
-                  (int)x, (int)y,
+                  (int)vx, (int)vy,
                   (ULONG)gs->active_width, (ULONG)gs->active_height,
                   (int)bi->MouseX, (int)bi->MouseY);
             gs->cursor_oob_last_log = gs->stat_setspritepos;
@@ -953,18 +990,22 @@ static void chip_SetSpriteImage(struct BoardInfo *bi, RGBFTYPE format)
         }
     }
 
-    /* Sync position from BoardInfo so UPDATE_CURSOR has current coordinates.
-     * P96 sets MouseX/MouseY before calling SetSpriteImage. */
-    gs->cursor_x     = bi->MouseX;
-    gs->cursor_y     = bi->MouseY;
+    /* Sync position from BoardInfo so UPDATE_CURSOR has current
+     * coordinates.  P96 sets MouseX/MouseY before calling
+     * SetSpriteImage.  Apply the same panned-origin transform as
+     * chip_SetSpritePosition so the two paths can never disagree. */
+    gs->cursor_x     = (WORD)(bi->MouseX - bi->XOffset);
+    gs->cursor_y     = (WORD)(bi->MouseY - bi->YOffset);
     gs->cursor_hot_x = bi->MouseXOffset;
     gs->cursor_hot_y = bi->MouseYOffset;
 
-    DCHIP("SpriteImage: %ux%u hot=%d,%d pos=%d,%d active=%lux%lu",
-          (unsigned)mw, (unsigned)mh,
-          (int)bi->MouseXOffset, (int)bi->MouseYOffset,
-          (int)bi->MouseX, (int)bi->MouseY,
-          (ULONG)gs->active_width, (ULONG)gs->active_height);
+    /* Verbose only -- fires on every pointer-image alternation
+     * (AOS4 animates the busy pointer), which floods the ring. */
+    DCHIP_V("SpriteImage: %ux%u hot=%d,%d pos=%d,%d active=%lux%lu",
+            (unsigned)mw, (unsigned)mh,
+            (int)bi->MouseXOffset, (int)bi->MouseYOffset,
+            (int)bi->MouseX, (int)bi->MouseY,
+            (ULONG)gs->active_width, (ULONG)gs->active_height);
 
     /* Upload cursor image with current position and hotspot */
     chip_CursorUpdate(gs, (uint32)bi->MouseXOffset, (uint32)bi->MouseYOffset);

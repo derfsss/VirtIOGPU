@@ -661,18 +661,28 @@ static void chip_BlitRect(struct BoardInfo *bi, struct RenderInfoChip *ri,
 /* -----------------------------------------------------------------------
  * chip_BlitRectNoMaskComplete -- vtable slot 39.
  *
- * P96 BlitRectNoMaskComplete opcode is the full BltBitMap "Minterm"
- * byte (graphics.library/BltBitMap autodoc).  Minterm encodes a
- * 3-input truth table over (A=mask, B=source, C=dest); the HIGH
- * nibble selects the behaviour when A=1 (inside the rectangle),
- * which is what we care about here ("NoMask" means A is implicitly 1).
- * Common values:
- *   0xC0 SrcCopy, 0x30 SrcInvert, 0x50 DstInvert, 0x60 SrcXorDst,
- *   0x00 Clear, 0xF0 Set.
- * Previously we did `opcode & 0xF` (low nibble) which collapses every
- * normal copy minterm to 0 -- so all gfxbench2d blits were drawn as
- * solid black (the visible "grey screen" symptom).  The right shift
- * is `opcode >> 4`.
+ * P96 BlitRectNoMaskComplete opcode encodes one of the 16 two-input
+ * raster logic ops (the BltBitMap minterm HIGH-nibble value: 0x0 Clear,
+ * 0x3 SrcInvert, 0x5 DstInvert, 0x6 SrcXorDst, 0xC SrcCopy, 0xF Set).
+ * AOS4 callers are NOT consistent about where they put it:
+ *
+ *   - graphics.library's screen-drag composition passes the 4-bit op
+ *     VALUE directly: opcode=0x0C for the dragged-screen content copy
+ *     (empirically traced on QEMU amigaone, 2026-06-10 -- the
+ *     "TRACE NMC ... op=0c" line during a title-bar drag).
+ *   - other paths pass a full minterm BYTE with the op in the high
+ *     nibble (0xC0-style, BltBitMap autodoc convention).
+ *
+ * The known-working ATIRadeon.chip (radeon_accel.c
+ * cb_BlitRectNoMaskComplete) programs `opcode & 0xf` straight into the
+ * GPU rop register, which handles the enum form; minterm-byte forms
+ * with an empty low nibble (0xC0 & 0xF = 0) would break there, so the
+ * OS presumably sends the enum form to boards.  We accept BOTH: a
+ * value with a non-zero high nibble is treated as a minterm byte
+ * (op = opcode >> 4), anything <= 0x0F is the op itself.  0x00 means
+ * Clear in either reading.  Decoding only the high nibble (the
+ * previous code) turned the screen-drag content copy (0x0C) into
+ * Clear -- the whole display went black while dragging a screen.
  * ----------------------------------------------------------------------- */
 static void chip_BlitRectNoMaskComplete(struct BoardInfo *bi,
                                          struct RenderInfoChip *src,
@@ -697,7 +707,7 @@ static void chip_BlitRectNoMaskComplete(struct BoardInfo *bi,
     UBYTE *d_base    = (UBYTE *)dst->Memory + (ULONG)dy * d_stride + (ULONG)dx * bpp;
     ULONG  row_bytes = (ULONG)w * bpp;
 
-    UBYTE rop = opcode >> 4;
+    UBYTE rop = (opcode > 0x0F) ? (UBYTE)(opcode >> 4) : opcode;
 
     /* Per-rop profile buckets so the log shows where time is going.
      * gfxbench2d's BltBitMap-style tests route through this function

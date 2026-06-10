@@ -842,7 +842,9 @@ void chip_CursorUpdate(struct ChipGPUState *gs, uint32 hot_x, uint32 hot_y)
     uint32 px = (gs->cursor_x < 0) ? 0 : (uint32)gs->cursor_x;
     uint32 py = (gs->cursor_y < 0) ? 0 : (uint32)gs->cursor_y;
 
-    DCHIP("UPDATE_CURSOR pos=%lu,%lu (raw %d,%d) hot=%lu,%lu res=%lu active=%lux%lu",
+    /* Verbose only -- fires per pointer-image change (the AOS4 busy
+     * pointer animates), which floods the ring at DCHIP level. */
+    DCHIP_V("UPDATE_CURSOR pos=%lu,%lu (raw %d,%d) hot=%lu,%lu res=%lu active=%lux%lu",
           (ULONG)px, (ULONG)py, (int)gs->cursor_x, (int)gs->cursor_y,
           (ULONG)hot_x, (ULONG)hot_y,
           (ULONG)gs->cursor_resource_id,
@@ -878,10 +880,12 @@ void chip_CursorMove(struct ChipGPUState *gs, WORD x, WORD y)
     uint32 px = (x < 0) ? 0 : (uint32)x;
     uint32 py = (y < 0) ? 0 : (uint32)y;
 
-    DCHIP("MOVE_CURSOR pos=%lu,%lu (raw %d,%d) res=%lu active=%lux%lu",
-          (ULONG)px, (ULONG)py, (int)x, (int)y,
-          (ULONG)gs->cursor_resource_id,
-          (ULONG)gs->active_width, (ULONG)gs->active_height);
+    /* Verbose only -- SetSpritePosition sends MOVE_CURSOR on every
+     * pointer move now, so an always-on log here would flood the ring. */
+    DCHIP_V("MOVE_CURSOR pos=%lu,%lu (raw %d,%d) res=%lu active=%lux%lu",
+            (ULONG)px, (ULONG)py, (int)x, (int)y,
+            (ULONG)gs->cursor_resource_id,
+            (ULONG)gs->active_width, (ULONG)gs->active_height);
 
     chip_cursor_send(gs, VIRTIO_GPU_CMD_MOVE_CURSOR,
                       gs->cursor_resource_id, px, py, 0, 0);

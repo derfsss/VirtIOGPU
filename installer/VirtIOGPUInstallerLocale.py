@@ -16,7 +16,7 @@ class VirtIOGPUInstallerLocale:
 
     def __init__(self, language="", catalogName='VirtIOGPU.catalog', builtinLanguage='english'):
         self.strings[self.MSG_WELCOME] = 'Welcome to the VirtIOGPU chip driver installer.\n\nvirtiogpu.chip is a Picasso96 RTG driver for the VirtIO GPU exposed by QEMU (-device virtio-gpu-pci).  It is for AmigaOS 4.1 Final Edition systems running inside QEMU; it does nothing useful on real hardware.\n\nThis installer will:\n1. Copy virtiogpu.chip to SYS:Kickstart/\n2. Add it to SYS:Kickstart/Kicklayout before PCIGraphics.card\n   (a backup is saved as Kicklayout.bak)\n\nA reboot is required afterwards to load the new Kickstart module.'
-        self.strings[self.MSG_FINISH] = 'virtiogpu.chip has been installed.\n\nSYS:Kickstart/Kicklayout was updated (the previous version was saved as Kicklayout.bak).  The driver loads on the next reboot; make sure QEMU is started with a VirtIO GPU device:\n\n    -device virtio-gpu-pci\n\nor, for Virgl GPU acceleration:\n\n    -device virtio-gpu-gl-pci -display sdl,gl=on'
+        self.strings[self.MSG_FINISH] = 'virtiogpu.chip has been installed.\n\nSYS:Kickstart/Kicklayout was updated (the previous version was saved as Kicklayout.bak).  The driver loads on the next reboot; make sure QEMU is started with a VirtIO GPU device:\n\n    -device virtio-gpu-pci\n\nor, for Virgl GPU acceleration:\n\n    -device virtio-gpu-gl-pci -display sdl,gl=on\n\nNote: under QEMU the reboot below may power the virtual machine off instead of restarting it (verified on the amigaone machine) -- simply start QEMU again.'
         self.strings[self.MSG_REBOOT] = 'Reboot now (required to activate the new Kickstart module)'
 
         try:

@@ -34,6 +34,14 @@ drawer-relative content/ paths, exactly like the OS's own update
 installers.  Launching with PACKAGE=<absolute path> from elsewhere
 fails with "Python Runtime Error" (verified on Installation Utility
 under QEMU amigaone; with the correct CWD the wizard renders fully).
+
+Full manual click-through VERIFIED 2026-06-10 on QEMU amigaone
+(Installation Utility, drawer served over 9p SHARED:): chip copied to
+SYS:Kickstart/ (250968 bytes), MODULE line inserted immediately before
+PCIGraphics.card, Kicklayout.bak created.  The default-on Reboot
+post-install action runs `reboot SYNC`; on QEMU amigaone a guest
+reboot EXITS QEMU (clean exit 0) rather than resetting -- the finish
+text warns about this.
 """
 
 from installergen import (
@@ -65,7 +73,10 @@ locale = [
         "make sure QEMU is started with a VirtIO GPU device:\n\n"
         "    -device virtio-gpu-pci\n\n"
         "or, for Virgl GPU acceleration:\n\n"
-        "    -device virtio-gpu-gl-pci -display sdl,gl=on"),
+        "    -device virtio-gpu-gl-pci -display sdl,gl=on\n\n"
+        "Note: under QEMU the reboot below may power the virtual "
+        "machine off instead of restarting it (verified on the amigaone "
+        "machine) -- simply start QEMU again."),
     LocaleString(
         "MSG_REBOOT",
         "Reboot now (required to activate the new Kickstart module)"),

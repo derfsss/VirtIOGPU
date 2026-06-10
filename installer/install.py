@@ -78,11 +78,6 @@ def installExitHandler(page_nr, direction):
 SetObject(installPage, "exithandler", installExitHandler)
 
 ##############################################
-# finishPage
-finishPage = NewPage(FINISH)
-SetString(finishPage, 'message', loc.GetString(loc.MSG_FINISH))
-
-##############################################
 # Post-install actions
 
 def rebootHandler():
@@ -96,6 +91,11 @@ AddPostInstallAction(
     default=True,
     callback=rebootHandler,
     )
+
+##############################################
+# finishPage
+finishPage = NewPage(FINISH)
+SetString(finishPage, 'message', loc.GetString(loc.MSG_FINISH))
 
 ##############################################
 # Top-level packages (always registered)

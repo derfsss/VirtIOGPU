@@ -407,47 +407,22 @@ void chip_flush(WORD x, WORD y, UWORD w, UWORD h)
     x = (WORD)x0;          y = (WORD)y0;
     w = (UWORD)(x1 - x0);  h = (UWORD)(y1 - y0);
 
-    /* Wake the flush task immediately -- replaces the legacy activity_counter
-     * polling mechanism.  In double-buffer mode this is the only thing
-     * chip_flush does (the flush task will coalesce into a single full-frame
-     * swap).  Tearing is avoided because we never transfer to the front
-     * resource on this code path; the flush task swaps front<->back atomically. */
+    /* Wake the flush task and return -- NO synchronous presentation.
+     *
+     * This used to convert + TRANSFER_TO_HOST + RESOURCE_FLUSH the rect
+     * inline (two synchronous VirtIO round-trips under io_lock) on the
+     * single-buffer path.  That made every FillRect / BlitTemplate /
+     * DrawLine pay a fixed ~2.5 ms regardless of size: gfxbench2d
+     * measured FillRect at ~400 ops/s flat from 16x16 to 512x512 while
+     * BltBitMap (whose path was already signal-only) ran at 254,000
+     * ops/s.  The synchronous work was also redundant: the flush task
+     * presents a full frame on every wake anyway (it has to -- with
+     * BIF_GRANTDIRECTACCESS the OS writes pixels behind the vtable's
+     * back, so only a full-frame pass catches everything).
+     *
+     * Latency is unchanged: the signal wakes the higher-priority flush
+     * task immediately, exactly as it always did for BlitRect/NMC. */
     chip_flush_signal_activity(gs);
-
-    if (gs->double_buffer) return;
-
-    struct ExecIFace *IExec = gs->IExec;
-    IExec->MutexObtain(gs->io_lock);
-
-    chip_convert_rect(gs, gs->fb_mem, (uint32)x, (uint32)y, w, h);
-
-    if (gs->virgl_2d_ready && !gs->virgl_ctx_error) {
-        struct virtio_gpu_box box;
-        chip_zero(&box, sizeof(box));
-        box.x = (uint32)x;
-        box.y = (uint32)y;
-        box.w = (uint32)w;
-        box.h = (uint32)h;
-        box.d = 1;
-        BOOL t3d = chip_TransferToHost3D(gs, gs->virgl_2d_ctx, gs->resource_id,
-            0, gs->fb_stride, 0,
-            (uint64)((ULONG)y * gs->fb_stride + (ULONG)x * 4), &box);
-        if (!t3d) {
-            DCHIP("chip_flush: TransferToHost3D FAILED ctx=%lu res=%lu -- context poisoned, will recover",
-                  (unsigned long)gs->virgl_2d_ctx, (unsigned long)gs->resource_id);
-            gs->virgl_ctx_error = TRUE;
-            uint64 offset2 = (uint64)((ULONG)y * gs->fb_stride + (ULONG)x * 4);
-            chip_TransferToHost2D(gs, gs->fb_resource_id, (ULONG)x, (ULONG)y, w, h, offset2);
-        }
-    } else {
-        uint64 offset = (uint64)((ULONG)y * gs->fb_stride + (ULONG)x * 4);
-        chip_TransferToHost2D(gs, gs->fb_resource_id, (ULONG)x, (ULONG)y, w, h, offset);
-    }
-    uint32 flush_res = (gs->virgl_ctx_error || !gs->virgl_2d_ready)
-                        ? gs->fb_resource_id : gs->resource_id;
-    chip_ResourceFlush(gs, flush_res, (ULONG)x, (ULONG)y, w, h);
-
-    IExec->MutexRelease(gs->io_lock);
 }
 
 /* -----------------------------------------------------------------------

@@ -480,21 +480,29 @@ static BOOL chip_scan_pci_caps(struct ChipGPUState *gs)
     }
 
     /* Probe MMIO: write ACK to STATUS, read back.  If it returns 0x00,
-     * direct MMIO doesn't work (AmigaOne / Articia S bridge).
+     * direct MMIO doesn't work on this machine.
      *
-     * PCI_CFG fallback (VirtIO spec 4.1.4.7) is implemented in VIO_* macros
-     * via gs->use_pci_cfg dispatch, but intentionally NOT auto-enabled here:
-     * QEMU's -M amigaone machine model has a bug in hw/ppc/amigaone.c where
-     * the Articia S bridge does not register PCI BAR memory regions.  Any
-     * PCI_CFG access hits an assertion failure inside virtio_address_space_lookup
-     * and crashes QEMU.  Until QEMU is fixed, fail cleanly on non-Pegasos2.
+     * History: this probe used to fail on QEMU's -M amigaone, and the
+     * PCI_CFG fallback crashed QEMU (assertion in
+     * virtio_address_space_lookup) — both were misattributed to a QEMU
+     * machine-model bug.  The real cause was the AmigaOne PCI probe
+     * bug (see the BAR repair in chip_InitCard_C): the OS left the
+     * 64-bit BAR4's high dword at 0xFFFFFFFF, so the BAR decoded
+     * outside the addressable window — MMIO read open bus, and the
+     * PCI_CFG window had no mapped BAR to resolve into.  With the
+     * repair in place, direct MMIO works on QEMU amigaone.
      *
-     * On real hardware or a fixed QEMU, enabling use_pci_cfg manually would
-     * route all VIO_* accesses through PCI config space (ReadConfigLong /
-     * WriteConfigLong) which the Articia S does forward correctly. */
+     * On REAL Articia S hardware MMIO is still expected to fail (the
+     * bridge does not forward CPU memory cycles); there the PCI_CFG
+     * fallback (VirtIO spec 4.1.4.7, implemented in the VIO_* macros
+     * via gs->use_pci_cfg) is the intended path — it routes accesses
+     * through ReadConfigLong/WriteConfigLong, which Articia forwards
+     * correctly.  It is still not auto-enabled, pending real-hardware
+     * validation. */
     if (!gs->common_cfg_base) {
         DCHIP("ERROR: No MMIO common_cfg_base -- unsupported platform");
-        DCHIP("  This driver requires QEMU -M pegasos2 (MV64361 bridge).");
+        DCHIP("  This driver requires a bridge that forwards PCI MMIO"
+              " (QEMU pegasos2 / amigaone).");
         return FALSE;
     }
 
@@ -506,8 +514,8 @@ static BOOL chip_scan_pci_caps(struct ChipGPUState *gs)
     if (probe != VIRTIO_STATUS_ACKNOWLEDGE) {
         DCHIP("ERROR: MMIO probe FAILED (status=0x%02x, expect 0x01)", (uint32)probe);
         DCHIP("  Direct MMIO to PCI BARs does not work on this machine.");
-        DCHIP("  This driver requires QEMU -M pegasos2 (MV64361 bridge).");
-        DCHIP("  AmigaOne (Articia S) is NOT SUPPORTED -- QEMU bug in PCI_CFG path.");
+        DCHIP("  (Real Articia S hardware does not forward PCI MMIO; the"
+              " PCI_CFG fallback is scaffolded but not auto-enabled.)");
         return FALSE;
     }
 
@@ -982,6 +990,36 @@ BOOL chip_InitCard_C(struct BoardInfo *bi, char **toolTypes, APTR cardDesc)
         uint32 caps = pciDev->GetCapabilities();
         if (!(caps & PCI_CAP_BUSMASTER))
             pciDev->SetCapabilities(PCI_CAP_BUSMASTER | PCI_CAP_SETCLR);
+    }
+
+    /* --- AmigaOne PCI probe bug repair (same workaround as
+     * virtioscsi.device and nvme.device).  The AmigaOne's PCI
+     * enumeration does not understand 64-bit BARs: it sizes the high
+     * dword as if it were an independent 32-bit BAR (writes
+     * 0xFFFFFFFF, reads all-ones back) and never assigns it, while
+     * the chosen address goes to the LOW dword only.  The device then
+     * decodes at 0xFFFFFFFF_xxxxxxxx: every MMIO read returns open
+     * bus (this is what made the MMIO status probe below read 0x00 on
+     * amigaone), and QEMU's VirtIO PCI_CFG window asserts in
+     * virtio_address_space_lookup because the BAR is unmapped — both
+     * symptoms previously misattributed to a QEMU machine bug.
+     * virtio-gpu-pci carries its VirtIO config windows in BAR4, a
+     * 64-bit prefetchable BAR (config 0x20/0x24).  Walk all six BAR
+     * slots and zero any 64-bit BAR's high dword that still holds the
+     * sizing pattern. --- */
+    for (int b = 0; b < 6; b++) {
+        uint32 off = PCI_BASE_ADDRESS_0 + b * 4;
+        uint32 lo  = pciDev->ReadConfigLong(off);
+        if ((lo & 0x1u) == 0 && (lo & 0x6u) == 0x4u) {  /* 64-bit memory BAR */
+            if (b == 5) break;          /* malformed: no room for high half */
+            uint32 hi = pciDev->ReadConfigLong(off + 4);
+            if (hi == 0xFFFFFFFFu) {
+                DCHIP("BAR%d high dword is 0xFFFFFFFF (AmigaOne PCI probe"
+                      " bug), zeroing", b);
+                pciDev->WriteConfigLong(off + 4, 0);
+            }
+            b++;                        /* skip the high-half slot */
+        }
     }
 
     /* --- Scan all 6 PCI BARs -- log type/address/size, set IMMU on memory BARs --- */

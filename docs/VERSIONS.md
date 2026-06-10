@@ -1928,6 +1928,45 @@ drag back restores cleanly.
 
 ---
 
+## v53.161 -- 11.06.2026
+
+**Soft-sprite cursor + asynchronous chip_flush (FillRect 4-178x)**
+
+### Cursor: OS-drawn soft sprite (alignment fix)
+
+`bi->SoftSpriteFlags` now covers every supported format, so
+graphics.library draws the pointer into the framebuffer at its own
+logical position.  The VirtIO hardware cursor plane is rendered by the
+HOST at the HOST pointer position, while clicks land at the position
+AmigaOS integrates from raw PS/2 deltas -- mouse acceleration makes the
+two drift apart (user-reported: selection boxes offset from the
+pointer, close gadget unhittable).  A soft sprite cannot disagree with
+the click position.  BIF_HASSPRITEBUFFER dropped (rtg.library needs
+its MouseSaveBuffer for the under-cursor save/restore).  The cursor
+plane code stays wired; zero SoftSpriteFlags to revert.
+
+### Performance: chip_flush is now signal-only
+
+gfxbench2d baseline: FillRect pinned at ~400 ops/s regardless of size
+(2.5 ms fixed per op) while BltBitMap ran 254k ops/s.  chip_flush()
+was doing a synchronous convert + TRANSFER + RESOURCE_FLUSH round-trip
+per drawing op, redundantly -- the flush task full-frames every wake
+anyway (GRANTDIRECTACCESS).  Now it clips + signals only.
+
+Measured (QEMU amigaone, 1280x800x32): FillRect 16x16 357->63,469
+ops/s (178x); 512x512 299->1,232 ops/s (4.1x, memory-bound at
+308 MPixel/s); Random mixed 2,407->6,028 ops/s (2.5x); blits
+unchanged.
+
+### Lab note
+
+A boot stall reproduced after this change turned out to be hd0.qcow2
+filesystem corruption from repeated hard QEMU kills during the
+session, not the change -- a fresh temp image from masters boots and
+benches cleanly.  Prefer fresh temp dirs after hard kills.
+
+---
+
 ## Planned releases
 
 | Version | Phase | Objective |

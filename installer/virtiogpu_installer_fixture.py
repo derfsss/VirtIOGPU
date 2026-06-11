@@ -44,7 +44,7 @@ text warns about this.
 from installergen import (
     Project, Page, PageKind, Package, PackageKind, PostInstallAction,
     LocaleString, LocaleRef, GuiBlock, GuiWidget, WidgetKind,
-    GroupOrientation, Frame,
+    GroupOrientation, Frame, LabelAlign,
 )
 from installergen.model import Handler
 
@@ -168,7 +168,8 @@ welcome_page = Page(
         orientation=GroupOrientation.VERTICAL,
         children=[
             GuiWidget(kind=WidgetKind.LABEL,
-                      label=LocaleRef("MSG_WELCOME")),
+                      label=LocaleRef("MSG_WELCOME"),
+                      weight=6, align=LabelAlign.LEFT),
             GuiBlock(
                 orientation=GroupOrientation.HORIZONTAL,
                 weight=0,
@@ -184,7 +185,7 @@ welcome_page = Page(
                     GuiWidget(kind=WidgetKind.SPACE, weight=1),
                 ],
             ),
-            GuiWidget(kind=WidgetKind.SPACE),
+            GuiWidget(kind=WidgetKind.SPACE, weight=1),
         ],
     ),
 )

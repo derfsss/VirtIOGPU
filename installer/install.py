@@ -60,13 +60,13 @@ def readmeLaunch(page, id):
 
 StartGUI(welcomePage)
 BeginGroup(GROUP_VERTICAL)
-AddLabel(label=loc.GetString(loc.MSG_WELCOME))
+AddLabel(label=loc.GetString(loc.MSG_WELCOME), align=ALIGN_LEFT, weight=6)
 BeginGroup(GROUP_HORIZONTAL, weight=0)
 AddSpace(weight=1)
 AddButton(label=loc.GetString(loc.MSG_README_BUTTON), frame=BUTTON_FRAME, onclick=readmeLaunch, weight=10)
 AddSpace(weight=1)
 EndGroup()
-AddSpace()
+AddSpace(weight=1)
 EndGroup()
 EndGUI()
 

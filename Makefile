@@ -146,17 +146,18 @@ dist: all
 	cp -f installer/install.py                    $(DIST_STAGE)/install.py
 	cp -f installer/install.py.info               $(DIST_STAGE)/install.py.info
 	cp -f installer/VirtIOGPUInstallerLocale.py   $(DIST_STAGE)/VirtIOGPUInstallerLocale.py
+	cp -f installer/drawer.info                   $(DIST_DIR)/VirtIOGPU.info
 	cp -f README.md                               $(DIST_STAGE)/README.md
 	@echo "=== Staged distribution drawer ==="
-	@find $(DIST_STAGE) -type f | sort
+	@find $(DIST_STAGE) $(DIST_DIR)/VirtIOGPU.info -type f | sort
 
 dist-lha: dist
 	rm -f $(DIST_LHA)
 	@if command -v lha >/dev/null 2>&1; then \
-	    (cd $(DIST_DIR) && lha ao5q ../VirtIOGPU.lha VirtIOGPU); \
+	    (cd $(DIST_DIR) && lha ao5q ../VirtIOGPU.lha VirtIOGPU VirtIOGPU.info); \
 	else \
 	    echo "lha not on PATH — packing inside Docker"; \
-	    $(DOCKER_RUN) sh -c 'cd $(DIST_DIR) && lha ao5q /work/$(DIST_LHA) VirtIOGPU'; \
+	    $(DOCKER_RUN) sh -c 'cd $(DIST_DIR) && lha ao5q /work/$(DIST_LHA) VirtIOGPU VirtIOGPU.info'; \
 	fi
 	@ls -la $(DIST_LHA)
 

@@ -1,25 +1,26 @@
-# VirtIOGPU — VirtIO GPU Driver for AmigaOS 4.1FE
+# virtiogpu.chip
 
-> ⚠️ **BETA — actively under development.** This driver is a work in
-> progress. Things are incomplete, may break, or may not work at all.
-> Expect bugs, crashes, and rough edges. Do not rely on it for anything
-> important. Use at your own risk.
+A Picasso96 RTG graphics driver for AmigaOS 4.1 Final Edition on the QEMU VirtIO GPU.
 
-**Status: Beta.**
+**Status:** Beta (v53.161) — Workbench-ready on QEMU Pegasos2 and AmigaOne; Sam460 planned.
 
-A native AmigaOS 4.1 Picasso96 chip driver for the VirtIO GPU
-(PCI `1AF4:1050`) as provided by QEMU. Boots Workbench with full RTG
-support — 8/16/32-bit screen modes, hardware cursor, EDID-based native
-resolution detection, dynamic mode switching, and Virgl 2D/3D GPU
-acceleration.
-
-The current aim is to get the driver fully working on the **QEMU Pegasos2**
-machine before leaving beta. The **QEMU AmigaOne** machine also works
-(see [Platform](#platform) below); **Sam460** is a planned future target.
+> ⚠️ **Beta — actively under development.** Expect bugs and rough
+> edges; do not rely on it for anything important. Use at your own
+> risk.
 
 ---
 
-## Status
+## Overview
+
+`virtiogpu.chip` drives the VirtIO GPU (PCI `1AF4:1050`) provided by
+QEMU, giving AmigaOS 4.1 FE full RTG support: 8/16/32-bit screen
+modes, EDID-based native resolution detection, dynamic mode switching,
+screen dragging, and Virgl 2D/3D GPU acceleration.
+
+Recent releases fixed screen dragging, aligned the pointer with the
+click position (OS-drawn soft sprite), and made small fills up to two
+orders of magnitude faster (asynchronous flush) — see
+[docs/VERSIONS.md](docs/VERSIONS.md) for the full history.
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -33,14 +34,38 @@ machine before leaving beta. The **QEMU AmigaOne** machine also works
 | Phase 5d | Compositing (CompositeTags) | Working |
 | Phase 6 | MiniGL / Warp3D via Virgl 3D | Planned |
 
-The driver is in **beta**: it boots and runs Workbench reliably on
-Pegasos2 QEMU, but is still being stabilised before a 1.0 release.
+---
+
+## Features
+
+- **8/16/32-bit colour** — CLUT8, R5G6B5, and B8G8R8X8 pixel formats.
+- **Screen modes** — standard SVGA/HD modes plus the EDID native
+  resolution; the framebuffer resource is recreated to match the
+  active mode on each screen-mode change.
+- **Screen dragging** — full support for AmigaOS dragged-screen
+  composition.
+- **Pointer** — OS-drawn soft sprite, so the rendered cursor always
+  matches the click position under QEMU's relative mouse input.  The
+  VirtIO hardware-cursor plane is implemented but disabled by default
+  (host-rendered cursors drift from the guest pointer position).
+- **EDID support** — `GET_EDID` for native resolution detection.
+- **DPMS** — display power management.
+- **Virgl 2D acceleration** — FillRect via `CLEAR`, BlitRect via
+  `BLIT` (GPU-side), when QEMU exposes Virgl (`virtio-gpu-gl-pci`).
+- **Hardware compositing** — `CompositeTags` hook with Porter-Duff
+  blend states.
 
 ---
 
-## Platform
+## Requirements
 
-The beta targets the **QEMU Pegasos2** machine:
+- AmigaOS 4.1 Final Edition.
+- QEMU with `-M pegasos2` or `-M amigaone` and a VirtIO GPU display
+  device (see below).
+
+---
+
+## QEMU Setup
 
 ```
 -M pegasos2 -device virtio-gpu-pci
@@ -52,70 +77,80 @@ or, for Virgl GPU acceleration:
 -M pegasos2 -device virtio-gpu-gl-pci -display sdl,gl=on
 ```
 
-The Pegasos2 MV64361 bridge transparently maps PCI BAR addresses into the
-CPU address space, allowing direct MMIO access via `lwbrx`/`stwbrx`.
+The Pegasos2 MV64361 bridge transparently maps PCI BAR addresses into
+the CPU address space, allowing direct MMIO access via
+`lwbrx`/`stwbrx`.
 
-**QEMU AmigaOne** also works:
+**QEMU AmigaOne** works the same way:
 
 ```
 -M amigaone -device virtio-gpu-pci
 ```
 
-AmigaOS's AmigaOne PCI enumeration leaves the high dword of 64-bit BARs
-unprogrammed (the "AmigaOne PCI probe bug"); the driver repairs the BAR
-before its scan, after which direct MMIO works and the full init
-succeeds.  Verified: 1280x800 Workbench on `-M amigaone`.  Note this
-applies to the QEMU machine only — real Articia S silicon does not
-forward PCI MMIO, so real-hardware support would need the scaffolded
-PCI_CFG fallback (untested).
+AmigaOS's AmigaOne PCI enumeration leaves the high dword of 64-bit
+BARs unprogrammed (the "AmigaOne PCI probe bug"); the driver repairs
+the BAR before its scan, after which direct MMIO works.  This applies
+to the QEMU machine only — real Articia S silicon does not forward
+PCI MMIO, so real-hardware support would need the scaffolded PCI_CFG
+fallback (untested).
 
-**Future QEMU targets (not yet supported):**
-
-- **Sam460**
-
-On an unsupported machine the driver fails cleanly at init with a
-diagnostic message rather than crashing.
-
----
-
-## Requirements
-
-- **QEMU machine**: `-M pegasos2` with `-device virtio-gpu-pci` (or
-  `-device virtio-gpu-gl-pci` for Virgl acceleration).
-- **OS**: AmigaOS 4.1 Final Edition.
+**Sam460** is a planned future target.  On an unsupported machine the
+driver fails cleanly at init with a diagnostic message rather than
+crashing.
 
 ---
 
 ## Installation
 
-Copy `build/virtiogpu.chip` into `SYS:Kickstart/` on your AmigaOS volume,
-then add it to `SYS:Kickstart/Kicklayout` **before** `PCIGraphics.card`:
+Copy `build/virtiogpu.chip` into `SYS:Kickstart/` on your AmigaOS
+volume, then add it to `SYS:Kickstart/Kicklayout` **before**
+`PCIGraphics.card`:
 
 ```
 MODULE Kickstart/virtiogpu.chip
 MODULE Kickstart/PCIGraphics.card
 ```
 
-The chip binary contains two residents:
-
-- **VirtIOGPUBoard** (`NT_RESOURCE`, pri 65) — runs before graphics.library,
-  hooks `PCIGraphics.card`'s `FindCard` / `InitBoard` methods via `SetMethod`.
-- **virtiogpu.chip** (`NT_LIBRARY`, pri -128) — loaded on demand for GPU
-  init and the Picasso96 BoardInfo vtable.
-
-No configuration is required. The driver queries QEMU for the active
+No configuration is required.  The driver queries QEMU for the active
 display via `GET_DISPLAY_INFO` and EDID, and registers screen modes
 automatically.
 
+Note that bboot-based setups load Kickstart from `kickstart.zip`, not
+from `SYS:Kickstart/Kicklayout` — on those, add the chip and the
+Kicklayout line to the zip instead.
+
+### Distribution archive
+
+`make dist` stages an AmigaOS **Installation Utility** drawer under
+`build/dist/VirtIOGPU/` (chip + installer script + readme);
+`make dist-lha` packs it into `build/VirtIOGPU.lha`.
+
+The bundled `install.py` targets the Python-based Installation Utility
+shipped with every AmigaOS 4.1 Final Edition: it copies the chip to
+`SYS:Kickstart/`, inserts the `MODULE` line into Kicklayout (backing
+up `Kicklayout.bak` first, idempotently), and offers a reboot.
+**Launch it from inside the extracted drawer** (double-click, or `CD`
+into the drawer first) — the script uses drawer-relative `content/`
+paths, like the OS's own update installers.
+
+One QEMU quirk: the "Reboot now" option on the finish page may power
+the virtual machine off instead of restarting it — simply start QEMU
+again.
+
+`installer/install.py` is pre-generated from
+`installer/virtiogpu_installer_fixture.py` and committed, so building
+the archive needs no extra tooling.
+
 ---
 
-## Building
+## Building from Source
 
-Requires the `walkero/amigagccondocker:os4-gcc11` Docker image (provides
-`ppc-amigaos-gcc`, GCC 11).
+Requires the `walkero/amigagccondocker:os4-gcc11` Docker image
+(provides `ppc-amigaos-gcc`, GCC 11).
 
 Run `clean` and `all` as **separate** Docker invocations — a combined
-parallel build races (clean deletes the build dir while compilation runs):
+parallel build races (clean deletes the build dir while compilation
+runs):
 
 ```sh
 docker run --rm -v "$(pwd):/src" -w /src \
@@ -132,41 +167,9 @@ Outputs in `build/`:
 - `setup_monitor`, `monitor_stub`, `test_composite`, `virtiogpu_info`
   — helper / diagnostic tools
 
-### Distribution archive
-
-`make dist` stages an AmigaOS **Installation Utility** drawer under
-`build/dist/VirtIOGPU/` (chip + installer script + readme);
-`make dist-lha` packs it into `build/VirtIOGPU.lha`.
-
-The bundled `install.py` targets the Python-based Installation Utility
-shipped with every AmigaOS 4.1 Final Edition: it copies the chip to
-`SYS:Kickstart/`, inserts the `MODULE` line into
-`SYS:Kickstart/Kicklayout` immediately before `PCIGraphics.card`
-(backing up `Kicklayout.bak` first, idempotently, LF-only), and offers
-a reboot.  **Launch it from inside the extracted drawer** (double-click,
-or `CD` into the drawer first) — the script uses drawer-relative
-`content/` paths, like the OS's own update installers.
-
-The full install (copy + Kicklayout edit + backup) is verified on the
-QEMU amigaone machine.  One QEMU quirk: the "Reboot now" option on the
-finish page may power the virtual machine off instead of restarting it
-(an AmigaOS reboot exits QEMU on the amigaone machine) — simply start
-QEMU again.  Note that bboot-based setups load Kickstart from
-`kickstart.zip`, not from `SYS:Kickstart/Kicklayout`; on those, add the
-chip to the zip instead (the installed Kicklayout edit is harmless but
-unused).
-
-`installer/install.py` is pre-generated by
-[InstallerScriptGen](https://github.com/derfsss) from
-`installer/virtiogpu_installer_fixture.py`; regeneration instructions
-are in that file's docstring.
-
 ---
 
-## Architecture
-
-The driver is a single component, `virtiogpu.chip`, built from a
-two-resident architecture that uses `SetMethod` hooks on `PCIGraphics.card`:
+## Project Structure
 
 ```
 src/chip/
@@ -189,45 +192,28 @@ include/chip/chip_state.h  — ChipGPUState struct, MMIO inlines, macros
 include/virgl/virgl_cmd.h  — Virgl command buffer builder API
 ```
 
-An earlier standalone `virtiogpu.device` driver (Phases 1–2) has been
-removed — the chip driver does its own VirtIO init via the `SetMethod`
-hooks, so no separate device is needed.
+### Architecture notes
 
-### Key constraints
+The chip binary contains two AmigaOS residents:
 
-- **Chip uses `-mcrt=newlib`** 
-- **Modern VirtIO only** — PCI device ID `0x1050`; no legacy transport.
-- **MMIO via `stwbrx` / `lwbrx`**
-- **Two virtqueues** — queue 0 (control), queue 1 (cursor).
+- **VirtIOGPUBoard** (`NT_RESOURCE`, pri 65) — runs before
+  graphics.library and hooks `PCIGraphics.card`'s `FindCard` /
+  `InitBoard` methods via `SetMethod`.
+- **virtiogpu.chip** (`NT_LIBRARY`, pri -128) — loaded on demand for
+  GPU init and the Picasso96 BoardInfo vtable.
 
----
+Key constraints: the chip is built with `-mcrt=newlib`; only the
+modern VirtIO transport exists for device `0x1050`; MMIO uses
+`stwbrx`/`lwbrx` inline assembly; two virtqueues (control + cursor).
 
-## Features
-
-- **8/16/32-bit colour** — CLUT8, R5G6B5, and B8G8R8X8 pixel formats.
-- **Screen modes** — standard SVGA/HD modes plus the EDID native
-  resolution; the framebuffer resource is recreated to match the active
-  mode on each screen-mode change.
-- **Hardware cursor** — VirtIO GPU cursor plane (64×64 ARGB).
-- **EDID support** — `GET_EDID` for native resolution detection.
-- **DPMS** — display power management.
-- **Virgl 2D acceleration** — FillRect via `CLEAR`, BlitRect via `BLIT`
-  (GPU-side), when QEMU exposes Virgl (`virtio-gpu-gl-pci`).
-- **Hardware compositing** — `CompositeTags` hook with Porter-Duff blend
-  states.
-
----
-
-## VirtIO GPU Command Flow
-
-### 2D mode (standard)
+Command flow — 2D mode:
 
 ```
 RESOURCE_CREATE_2D → ATTACH_BACKING → SET_SCANOUT
-TRANSFER_TO_HOST_2D + RESOURCE_FLUSH   (periodic flush task)
+TRANSFER_TO_HOST_2D + RESOURCE_FLUSH   (signal-driven flush task)
 ```
 
-### Virgl 2D mode (GPU-accelerated)
+Virgl 2D mode (GPU-accelerated):
 
 ```
 CTX_CREATE → RESOURCE_CREATE_3D → ATTACH_BACKING → SET_SCANOUT
@@ -242,4 +228,19 @@ buffers (`cmd_buf` / `resp_buf`).
 
 ## Documentation
 
-- [docs/VERSIONS.md](docs/VERSIONS.md) — version history and release notes.
+- [docs/VERSIONS.md](docs/VERSIONS.md) — version history and release
+  notes.
+
+---
+
+## Development
+
+This driver was developed with [Claude](https://claude.ai) (Anthropic)
+acting as the primary engineer — writing the C code, designing the
+architecture, debugging hardware-level issues, and navigating the
+AmigaOS 4.1 SDK — with a human developer directing, reviewing, and
+testing the result.
+
+## License
+
+Copyright © 2026. All rights reserved.

@@ -1,4 +1,4 @@
-"""InstallerScriptGen fixture for the VirtIOGPU chip driver installer.
+"""Installer-script fixture for the VirtIOGPU chip driver installer.
 
 Produces an AmigaOS 4.1 FE `Installation Utility` script (Python 2.5)
 that:
@@ -11,14 +11,11 @@ that:
      Kicklayout.bak backup, LF-only line endings, and idempotency
   3. offers a reboot on the finish page
 
-Regenerate install.py + VirtIOGPUInstallerLocale.py with:
-
-    PYTHONPATH=<InstallerScriptGen>/src:installer \
-        python -m installergen emit virtiogpu_installer_fixture installer/
-
-(InstallerScriptGen: https://github.com/derfsss -- separate project;
-the emitted files are committed here so building the distribution
-archive needs no extra tooling.)
+install.py + VirtIOGPUInstallerLocale.py are emitted from this fixture
+by an in-house installer-script generator and committed, so building
+the distribution archive needs no extra tooling.  This fixture is the
+authoritative description of the installer's pages, messages, and
+behaviour.
 
 Archive layout consumed by the script (see `make dist`):
 

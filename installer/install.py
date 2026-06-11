@@ -52,8 +52,23 @@ def updateKicklayout():
 
 ##############################################
 # welcomePage
-welcomePage = NewPage(WELCOME)
-SetString(welcomePage, 'message', loc.GetString(loc.MSG_WELCOME))
+welcomePage = NewPage(GUI)
+
+def readmeLaunch(page, id):
+    amiga.system('notepad *>NIL: "README.md"')
+    return True
+
+StartGUI(welcomePage)
+BeginGroup(GROUP_VERTICAL)
+AddLabel(label=loc.GetString(loc.MSG_WELCOME))
+BeginGroup(GROUP_HORIZONTAL, weight=0)
+AddSpace(weight=1)
+AddButton(label=loc.GetString(loc.MSG_README_BUTTON), frame=BUTTON_FRAME, onclick=readmeLaunch, weight=10)
+AddSpace(weight=1)
+EndGroup()
+AddSpace()
+EndGroup()
+EndGUI()
 
 ##############################################
 # installPage

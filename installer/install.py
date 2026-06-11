@@ -1,6 +1,6 @@
 #
 # VirtIOGPU Chip Driver Install install.py
-# $VER: VirtIOGPU Chip Driver Install 53.158 (10.06.2026)
+# $VER: VirtIOGPU Chip Driver Install 53.161 (11.06.2026)
 # Auto-generated -- do not edit; regenerate from the fixture module.
 #
 

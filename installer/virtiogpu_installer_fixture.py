@@ -15,7 +15,9 @@ install.py + VirtIOGPUInstallerLocale.py are emitted from this fixture
 by an in-house installer-script generator and committed, so building
 the distribution archive needs no extra tooling.  This fixture is the
 authoritative description of the installer's pages, messages, and
-behaviour.
+behaviour.  The page idioms and the Kicklayout edit are expanded from
+`installergen.presets` -- the field-tested templates shared by all of
+this author's driver installers.
 
 Archive layout consumed by the script (see `make dist`):
 
@@ -43,52 +45,45 @@ text warns about this.
 
 from installergen import (
     Project, Page, PageKind, Package, PackageKind, PostInstallAction,
-    LocaleString, LocaleRef, GuiBlock, GuiWidget, WidgetKind,
-    GroupOrientation, Frame, LabelAlign,
+    LocaleString, LocaleRef, Handler,
 )
-from installergen.model import Handler
+from installergen.presets import (
+    README_BUTTON_LOCALE, InsertBeforeFirst, welcome_with_readme,
+    finish_page, system_edit_helper, system_edit_exit_handler,
+)
 
 
-# NOTE: the Installation Utility's page text is PLAIN TEXT only --
-# ReAction/console style escapes ("\033b" bold etc.) are not
-# interpreted (verified live: the ESC byte is dropped and the letter
-# renders literally).  Formatting is therefore typographic, following
-# the conventions of Hyperion's own Update installers: leading blank
-# line, paragraph spacing, indented numbered steps, quoted file and
-# button names, and an explicit navigation cue at the end.
+# NOTE: the Installation Utility's page text is PLAIN TEXT only and the
+# label does NOT scroll -- keep pages inside the ~20-rendered-line lint
+# budget and defer detail to the bundled readme.  Formatting follows
+# Hyperion's own Update installers: leading blank line, paragraph
+# spacing, quoted file and button names, explicit navigation cue.
 locale = [
     LocaleString(
         "MSG_WELCOME",
         "\nWelcome to the installation of the VirtIOGPU graphics "
         "driver.\n\n"
         "virtiogpu.chip is a Picasso96 (RTG) graphics driver for the "
-        "VirtIO GPU device provided by the QEMU emulator.  It is "
-        "intended for AmigaOS 4.1 Final Edition systems running inside "
-        "QEMU and serves no purpose on real hardware.\n\n"
+        "VirtIO GPU device provided by the QEMU emulator.\n\n"
         "The following changes will be made to your system:\n\n"
         "    1.  virtiogpu.chip will be copied to \"SYS:Kickstart\"\n\n"
         "    2.  \"SYS:Kickstart/Kicklayout\" will be updated to load "
-        "the driver during startup; the previous configuration will be "
-        "preserved as \"Kicklayout.bak\"\n\n"
-        "A system restart is required to complete the installation.\n\n"
-        "Click \"View Readme\" below for manual installation details "
-        "and general instructions on use.\n\n\n"
+        "the driver during startup (backup: \"Kicklayout.bak\")\n\n"
+        "A system restart completes the installation.  Click "
+        "\"View Readme\" below for manual installation details and "
+        "general instructions on use.\n\n\n"
         "Press \"Next\" to continue."),
-    LocaleString(
-        "MSG_README_BUTTON",
-        "View Readme..."),
+    README_BUTTON_LOCALE,
     LocaleString(
         "MSG_FINISH",
-        "\nThe installation completed successfully.\n\n"
+        "\nThe installation has finished.\n\n"
         "virtiogpu.chip has been copied to \"SYS:Kickstart\" and "
-        "\"SYS:Kickstart/Kicklayout\" has been updated.  The previous "
-        "configuration was preserved as \"Kicklayout.bak\".  The driver "
-        "will be activated by the next system restart.\n\n"
-        "Please ensure QEMU is started with a VirtIO GPU display "
-        "device:\n\n"
-        "    -device virtio-gpu-pci\n\n"
-        "or, for Virgl GPU acceleration:\n\n"
-        "    -device virtio-gpu-gl-pci -display sdl,gl=on\n\n"
+        "\"SYS:Kickstart/Kicklayout\" has been updated (backup: "
+        "\"Kicklayout.bak\").  The driver activates on the next "
+        "system restart.\n\n"
+        "QEMU must provide a VirtIO GPU display device "
+        "(-device virtio-gpu-pci); see the README.md file in this "
+        "drawer for details and the Virgl acceleration setup.\n\n"
         "Please note: when restarting from within QEMU, the virtual "
         "machine may power off instead of restarting.  Should this "
         "occur, simply start QEMU again.\n\n\n"
@@ -99,132 +94,33 @@ locale = [
 ]
 
 
-# Inserts the MODULE line into Kicklayout.  Pure Python 2.5; binary
-# file modes keep the LF-only line endings Kickstart loaders require.
-# Returns an error string, or None on success (including the
-# already-installed case).
-update_kicklayout = Handler(
-    name="updateKicklayout",
-    params=[],
-    body=(
-        "kl = \"SYS:Kickstart/Kicklayout\"\n"
-        "module_line = \"MODULE Kickstart/virtiogpu.chip\"\n"
-        "try:\n"
-        "    f = open(kl, \"rb\")\n"
-        "    data = f.read()\n"
-        "    f.close()\n"
-        "except IOError:\n"
-        "    return \"could not read \" + kl\n"
-        "lines = data.split(\"\\n\")\n"
-        "for ln in lines:\n"
-        "    if ln.strip() == module_line:\n"
-        "        return None        # already installed\n"
-        "out = []\n"
-        "inserted = 0\n"
-        "for ln in lines:\n"
-        "    stripped = ln.strip()\n"
-        "    if ((not inserted) and stripped.startswith(\"MODULE\")\n"
-        "            and stripped.find(\"PCIGraphics.card\") != -1):\n"
-        "        out.append(module_line)\n"
-        "        inserted = 1\n"
-        "    out.append(ln)\n"
-        "if not inserted:\n"
-        "    return (\"no 'MODULE Kickstart/PCIGraphics.card' line found \"\n"
-        "            \"in \" + kl)\n"
-        "try:\n"
-        "    b = open(kl + \".bak\", \"wb\")\n"
-        "    b.write(data)\n"
-        "    b.close()\n"
-        "except IOError:\n"
-        "    pass                   # backup is best-effort\n"
-        "try:\n"
-        "    f = open(kl, \"wb\")\n"
-        "    f.write(\"\\n\".join(out))\n"
-        "    f.close()\n"
-        "except IOError:\n"
-        "    return \"could not write \" + kl\n"
-        "return None\n"
-    ),
+# Welcome page with the View Readme button (proven preset).
+welcome_page = welcome_with_readme(LocaleRef("MSG_WELCOME"), "README.md")
+
+# Kicklayout edit: the chip MUST load before PCIGraphics.card, so the
+# MODULE line is inserted directly before it (proven preset:
+# idempotent, .bak backup, LF-only; errors if the anchor is missing).
+update_kicklayout = system_edit_helper(
+    "SYS:Kickstart/Kicklayout",
+    "MODULE Kickstart/virtiogpu.chip",
+    InsertBeforeFirst(contains="PCIGraphics.card",
+                      describe="MODULE Kickstart/PCIGraphics.card"),
 )
 
-
-# Welcome page is a GUI page (same rendered look as WELCOME) so it can
-# carry a "View Readme" button -- U2's kicklayout-page button idiom:
-# AddButton onclick handler launching NotePad on the bundled readme.
-welcome_page = Page(
-    var_name="welcomePage",
-    kind=PageKind.GUI,
-    on_click_handlers=[
-        Handler(
-            name="readmeLaunch",
-            params=["page", "id"],
-            body=(
-                "amiga.system('notepad *>NIL: \"README.md\"')\n"
-                "return True\n"
-            ),
-        ),
-    ],
-    gui=GuiBlock(
-        orientation=GroupOrientation.VERTICAL,
-        children=[
-            GuiWidget(kind=WidgetKind.LABEL,
-                      label=LocaleRef("MSG_WELCOME"),
-                      weight=6, align=LabelAlign.LEFT),
-            GuiBlock(
-                orientation=GroupOrientation.HORIZONTAL,
-                weight=0,
-                children=[
-                    GuiWidget(kind=WidgetKind.SPACE, weight=1),
-                    GuiWidget(
-                        kind=WidgetKind.BUTTON,
-                        frame=Frame.BUTTON,
-                        label=LocaleRef("MSG_README_BUTTON"),
-                        onclick="readmeLaunch",
-                        weight=10,
-                    ),
-                    GuiWidget(kind=WidgetKind.SPACE, weight=1),
-                ],
-            ),
-            GuiWidget(kind=WidgetKind.SPACE, weight=1),
-        ],
-    ),
-)
-
-# The Kicklayout edit runs when the INSTALL page is left in the forward
-# direction -- i.e. after the file copy has completed.  Errors are
-# reported via asl.MessageBox with manual-fix instructions; the wizard
-# still completes so the copied chip isn't left half-installed silently.
+# The edit runs when the INSTALL page is left in the forward direction
+# -- i.e. after the file copy has completed.
 install_page = Page(
     var_name="installPage",
     kind=PageKind.INSTALL,
-    exit_handler=Handler(
-        name="installExitHandler",
-        params=["page_nr", "direction"],
-        body=(
-            "if direction != 1:\n"
-            "    return True\n"
-            "err = updateKicklayout()\n"
-            "if err:\n"
-            "    try:\n"
-            "        import asl\n"
-            "        asl.MessageBox(\"VirtIOGPU installer\",\n"
-            "            \"Kicklayout update failed: \" + err + \"\\n\\n\"\n"
-            "            \"Please add this line to SYS:Kickstart/Kicklayout\\n\"\n"
-            "            \"manually, BEFORE the PCIGraphics.card line:\\n\\n\"\n"
-            "            \"MODULE Kickstart/virtiogpu.chip\",\n"
-            "            \"OK\")\n"
-            "    except StandardError:\n"
-            "        pass\n"
-            "return True\n"
-        ),
+    exit_handler=system_edit_exit_handler(
+        "SYS:Kickstart/Kicklayout",
+        "MODULE Kickstart/virtiogpu.chip",
+        "VirtIOGPU installer",
+        "manually, BEFORE the PCIGraphics.card line:",
     ),
 )
 
-finish_page = Page(
-    var_name="finishPage",
-    kind=PageKind.FINISH,
-    strings={"message": LocaleRef("MSG_FINISH")},
-)
+finish = finish_page(LocaleRef("MSG_FINISH"))
 
 
 chip_package = Package(
@@ -255,11 +151,11 @@ reboot_action = PostInstallAction(
 project = Project(
     name="VirtIOGPU Chip Driver Install",
     short_name="VirtIOGPU",
-    version="53.158",
-    date="10.06.2026",
+    version="53.161",
+    date="11.06.2026",
     locale_strings=locale,
     helpers=[update_kicklayout],
-    pages=[welcome_page, install_page, finish_page],
+    pages=[welcome_page, install_page, finish],
     packages=[chip_package],
     post_install_actions=[reboot_action],
 )

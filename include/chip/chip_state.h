@@ -517,6 +517,17 @@ struct ChipGPUState {
     uint32  virgl_2d_vbuf_res;  /* vertex buffer resource ID (PIPE_BUFFER) */
     uint32  virgl_test_quad;    /* 0=off, 1=colored quad, 2=textured quad (debug) */
 
+    /* v3d transport overlay -- warp3d.library renders into its own persistent
+     * render-target resource; the flush task composites it onto the scanout
+     * each frame (after flush_all) so 3D coexists with the desktop without
+     * flicker.  See src/chip/chip_v3d.c. */
+    BOOL    v3d_overlay_active;
+    uint32  v3d_overlay_res;    /* warp3d RT resource to BLIT onto scanout */
+    uint32  v3d_overlay_x, v3d_overlay_y;   /* dest rect on scanout */
+    uint32  v3d_overlay_w, v3d_overlay_h;
+    uint32  v3d_overlay_sw, v3d_overlay_sh; /* RT (src) dims */
+    uint32  v3d_next_handle;    /* virgl object handle allocator for v3d (>=200) */
+
     /* Compositing -- temporary texture for source bitmap upload.
      * A single temp resource + sampler view is allocated per compositing
      * call and freed afterwards.  Handles are recycled from the pool. */
@@ -615,6 +626,10 @@ static inline uint32 chip_alloc_resource_id(struct ChipGPUState *gs)
              id == gs->cursor_resource_id);
     return id;
 }
+
+/* chip_v3d.c -- composite the registered warp3d render target onto the
+ * scanout (called by the flush task each frame after flush_all). */
+void chip_v3d_composite_overlay(struct ChipGPUState *gs);
 
 /* -----------------------------------------------------------------------
  * Lightweight wall-clock profiling primitive.

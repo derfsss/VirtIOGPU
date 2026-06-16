@@ -461,14 +461,15 @@ void virgl_cmd_resource_inline_write(struct VirglCmdBuf *cbuf,
                                       uint32 x, uint32 y, uint32 z,
                                       uint32 w, uint32 h, uint32 d,
                                       const void *data, uint32 data_size);
+/* Boxes are pipe_box {x,y,z,width,height,depth} (offset+size).  21-word
+ * payload (VIRGL_BLIT_SIZE), matches mesa virgl_encode_blit: per-endpoint
+ * order is level, format, res, box. */
 void virgl_cmd_blit(struct VirglCmdBuf *cbuf,
                      uint32 s0_flags,
                      uint32 dst_res, uint32 dst_format, uint32 dst_level,
-                     uint32 dst_x1, uint32 dst_y1, uint32 dst_z1,
-                     uint32 dst_x2, uint32 dst_y2, uint32 dst_z2,
+                     uint32 dx, uint32 dy, uint32 dz, uint32 dw, uint32 dh, uint32 dd,
                      uint32 src_res, uint32 src_format, uint32 src_level,
-                     uint32 src_x1, uint32 src_y1, uint32 src_z1,
-                     uint32 src_x2, uint32 src_y2, uint32 src_z2);
+                     uint32 sx, uint32 sy, uint32 sz, uint32 sw, uint32 sh, uint32 sd);
 
 /* Object destruction */
 void virgl_cmd_destroy_object(struct VirglCmdBuf *cbuf, uint32 obj_type,

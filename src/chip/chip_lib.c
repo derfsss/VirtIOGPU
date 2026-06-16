@@ -15,7 +15,7 @@
  * ----------------------------------------------------------------------- */
 static const char chip_name[]  __attribute__((used)) = "virtiogpu.chip";
 static const char chip_idstr[] __attribute__((used)) =
-    "$VER: virtiogpu.chip 53.190 (16.06.2026)\r\n";
+    "$VER: virtiogpu.chip 53.196 (16.06.2026)\r\n";
 
 /* -----------------------------------------------------------------------
  * Global variable definitions

@@ -66,6 +66,29 @@ struct V3DIFace {
     /* Release a context obtained via ObtainContext (no-op for the shared
      * pipeline in milestone 1). */
     void (*ReleaseContext)(struct V3DIFace *Self, APTR token);
+
+    /* --- Milestone 2: own render target + overlay compositing --- */
+
+    /* Allocate a B8G8R8X8 render-target resource (w x h) in the chip's virgl
+     * context, create a surface for it, and return both handles.  The caller
+     * (warp3d.library) binds the surface as its framebuffer and renders into
+     * the RT.  Returns TRUE on success. */
+    BOOL (*AllocRenderTarget)(struct V3DIFace *Self, APTR token,
+                              uint32 w, uint32 h,
+                              uint32 *res_out, uint32 *surface_out);
+
+    /* Register (enable=TRUE) / unregister (enable=FALSE) an RT resource to be
+     * composited onto the scanout each frame: the chip BLITs the full RT
+     * (sw x sh) onto the scanout dest rect (x,y,w,h) after every flush.  This
+     * makes the 3D output persist over the desktop without flicker. */
+    void (*RegisterOverlay)(struct V3DIFace *Self, APTR token,
+                            uint32 rt_res, uint32 sw, uint32 sh,
+                            uint32 x, uint32 y, uint32 w, uint32 h,
+                            BOOL enable);
+
+    /* Free an RT resource (and its surface) previously allocated. */
+    void (*FreeRenderTarget)(struct V3DIFace *Self, APTR token,
+                             uint32 res, uint32 surface);
 };
 
 #endif /* V3D_IFACE_H */

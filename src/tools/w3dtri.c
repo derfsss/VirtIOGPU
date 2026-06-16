@@ -87,9 +87,10 @@ int main(void)
     tri.st_pattern = NULL;
 
     for (i = 0; i < frames; i++) {
+        IWarp3D->W3D_ClearDrawRegion(ctx, 0xFF202840);  /* dark blue-grey bg */
         IWarp3D->W3D_DrawTriangle(ctx, &tri);
         IWarp3D->W3D_Flush(ctx);
-        IDOS->Delay(1);   /* ~20ms; redraw so it survives the chip's present */
+        IDOS->Delay(2);   /* ~40ms */
     }
 
     printf("w3dtri: done\n");

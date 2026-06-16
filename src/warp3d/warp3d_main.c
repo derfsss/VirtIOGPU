@@ -38,9 +38,11 @@ static uint32 w3d_tagdata(struct TagItem *tags, uint32 tag, uint32 def)
 static void pack_vertex(float *out, const W3D_Vertex *v,
                         float fb_w, float fb_h)
 {
-    /* window -> NDC.  Window Y grows downward; NDC Y grows up, so flip Y. */
+    /* window -> NDC.  The render-into-RT + composite-BLIT path is one vertical
+     * flip relative to the chip's direct-to-scanout render, so window Y maps
+     * straight through (no extra flip here) to land upright after the blit. */
     out[0] = 2.0f * v->x / fb_w - 1.0f;   /* ndc x */
-    out[1] = 1.0f - 2.0f * v->y / fb_h;   /* ndc y */
+    out[1] = 2.0f * v->y / fb_h - 1.0f;   /* ndc y */
     out[2] = 0.0f;                        /* ndc z (M1: flat) */
     out[3] = 1.0f;                        /* w */
     out[4] = v->color.r;
@@ -76,8 +78,18 @@ static void upload_vertex_floats(struct VirglCmdBuf *cbuf, uint32 res_handle,
         virgl_emit_float(cbuf, data[i]);
 }
 
-/* Encode bind-shaders + upload + set-vbuf + draw, then submit + present.
- * verts = nverts * 8 floats (pos[4]+colour[4]).  Returns W3D_SUCCESS/-err. */
+/* Bind the context's own render target as the framebuffer.  All warp3d draws
+ * target the RT (not the live scanout); the chip composites the RT onto the
+ * scanout each frame, so 3D coexists with the desktop without flicker. */
+static void bind_rt_framebuffer(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
+{
+    uint32 surf = wv->rt_surface;
+    virgl_cmd_set_framebuffer_state(cbuf, 1, 0, &surf);
+}
+
+/* Encode FB-bind + shaders + upload + set-vbuf + draw into the RT, then submit.
+ * verts = nverts * 8 floats (pos[4]+colour[4]).  No scanout flush -- the chip's
+ * overlay composite presents the RT.  Returns W3D_SUCCESS/-err. */
 static uint32 draw_packed(struct W3DVirgl *wv, const float *verts,
                           uint32 nverts, uint32 pipe_prim)
 {
@@ -86,6 +98,19 @@ static uint32 draw_packed(struct W3DVirgl *wv, const float *verts,
     struct VirglVertexBuffer vb;
 
     virgl_cmd_init(&cbuf, cmd_words, 256);
+
+    bind_rt_framebuffer(&cbuf, wv);
+
+    /* Emit a deferred clear in the SAME command buffer so clear+draw reach the
+     * host atomically (the composite never sees a half-drawn RT). */
+    if (wv->pending_clear) {
+        float cr = (float)((wv->clear_argb >> 16) & 0xFF) / 255.0f;
+        float cg = (float)((wv->clear_argb >>  8) & 0xFF) / 255.0f;
+        float cb = (float)((wv->clear_argb      ) & 0xFF) / 255.0f;
+        float ca = (float)((wv->clear_argb >> 24) & 0xFF) / 255.0f;
+        virgl_cmd_clear(&cbuf, 4 /*PIPE_CLEAR_COLOR0*/, cr, cg, cb, ca, 1.0, 0);
+        wv->pending_clear = FALSE;
+    }
 
     /* Ensure the position+colour VS and per-vertex-colour FS are bound. */
     virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_VERTEX,   wv->info.vs_handle);
@@ -111,8 +136,6 @@ static uint32 draw_packed(struct W3DVirgl *wv, const float *verts,
         DW3D("draw_packed: Submit FAILED (%lu verts)\n", (unsigned long)nverts);
         return (uint32)-1;
     }
-    g_IV3D->Flush(g_IV3D, wv->info.token, wv->info.scanout_res,
-                  0, 0, wv->fb_w, wv->fb_h);
     return W3D_SUCCESS;
 }
 
@@ -184,6 +207,20 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
     wv->fb_w = wv->info.fb_width;
     wv->fb_h = wv->info.fb_height;
 
+    /* M2: allocate our own render target (drawregion-sized) and register it as
+     * a scanout overlay.  warp3d renders into the RT; the chip composites it
+     * onto the scanout every frame -> stable, flicker-free. */
+    if (!g_IV3D->AllocRenderTarget(g_IV3D, wv->info.token, wv->fb_w, wv->fb_h,
+                                   &wv->rt_res, &wv->rt_surface)) {
+        DW3D("CreateContext: AllocRenderTarget failed\n");
+        IExec->FreeVec(ctx);
+        IExec->FreeVec(wv);
+        if (error) *error = W3D_NOMEMORY;
+        return NULL;
+    }
+    g_IV3D->RegisterOverlay(g_IV3D, wv->info.token, wv->rt_res,
+                            wv->fb_w, wv->fb_h, 0, 0, wv->fb_w, wv->fb_h, TRUE);
+
     ctx->driver     = wv;
     ctx->drivertype = W3D_DRIVER_3DHW;
     ctx->drawregion = bm;
@@ -202,9 +239,16 @@ void w3d_DestroyContext(struct Warp3DIFace *Self, W3D_Context *ctx)
     (void)Self;
     if (!ctx) return;
     if (ctx->driver) {
-        if (g_IV3D)
-            g_IV3D->ReleaseContext(g_IV3D, ((struct W3DVirgl *)ctx->driver)->info.token);
-        IExec->FreeVec(ctx->driver);
+        struct W3DVirgl *wv = ctx->driver;
+        if (g_IV3D) {
+            if (wv->rt_res)
+                g_IV3D->RegisterOverlay(g_IV3D, wv->info.token, wv->rt_res,
+                                        0, 0, 0, 0, 0, 0, FALSE);
+            g_IV3D->FreeRenderTarget(g_IV3D, wv->info.token,
+                                     wv->rt_res, wv->rt_surface);
+            g_IV3D->ReleaseContext(g_IV3D, wv->info.token);
+        }
+        IExec->FreeVec(wv);
     }
     IExec->FreeVec(ctx);
 }
@@ -351,38 +395,42 @@ uint32 w3d_DrawArray(struct Warp3DIFace *Self, W3D_Context *ctx,
 uint32 w3d_ClearDrawRegion(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 color)
 {
     struct W3DVirgl *wv;
-    uint32 cmd_words[16];
-    struct VirglCmdBuf cbuf;
-    float r, g, b, a;
     (void)Self;
 
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
 
-    /* color = 0xAARRGGBB */
-    a = (float)((color >> 24) & 0xFF) / 255.0f;
-    r = (float)((color >> 16) & 0xFF) / 255.0f;
-    g = (float)((color >>  8) & 0xFF) / 255.0f;
-    b = (float)((color      ) & 0xFF) / 255.0f;
-
-    virgl_cmd_init(&cbuf, cmd_words, 16);
-    virgl_cmd_clear(&cbuf, 4 /*PIPE_CLEAR_COLOR0*/, r, g, b, a, 1.0, 0);
-    if (!g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id,
-                        cbuf.buf, cbuf.dwords))
-        return (uint32)-1;
-    g_IV3D->Flush(g_IV3D, wv->info.token, wv->info.scanout_res,
-                  0, 0, wv->fb_w, wv->fb_h);
+    /* Record the clear (0xAARRGGBB); the next draw emits it in the same submit
+     * as the geometry so the composite never sees a cleared-but-empty RT. */
+    wv->pending_clear = TRUE;
+    wv->clear_argb    = color;
     return W3D_SUCCESS;
 }
 
 uint32 w3d_Flush(struct Warp3DIFace *Self, W3D_Context *ctx)
 {
     struct W3DVirgl *wv;
+    uint32 cmd_words[16];
+    struct VirglCmdBuf cbuf;
     (void)Self;
+
+    /* The chip composites our RT onto the scanout every frame, so no explicit
+     * present is needed.  Only flush a clear that had no following draw (e.g.
+     * a clear-the-screen with no geometry) so it still takes effect. */
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
-    g_IV3D->Flush(g_IV3D, wv->info.token, wv->info.scanout_res,
-                  0, 0, wv->fb_w, wv->fb_h);
+    if (wv->pending_clear) {
+        float cr = (float)((wv->clear_argb >> 16) & 0xFF) / 255.0f;
+        float cg = (float)((wv->clear_argb >>  8) & 0xFF) / 255.0f;
+        float cb = (float)((wv->clear_argb      ) & 0xFF) / 255.0f;
+        float ca = (float)((wv->clear_argb >> 24) & 0xFF) / 255.0f;
+        virgl_cmd_init(&cbuf, cmd_words, 16);
+        bind_rt_framebuffer(&cbuf, wv);
+        virgl_cmd_clear(&cbuf, 4 /*PIPE_CLEAR_COLOR0*/, cr, cg, cb, ca, 1.0, 0);
+        g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id,
+                       cbuf.buf, cbuf.dwords);
+        wv->pending_clear = FALSE;
+    }
     return W3D_SUCCESS;
 }
 

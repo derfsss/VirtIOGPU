@@ -483,6 +483,16 @@ void chip_flush_all(void)
     struct ChipGPUState *gs = g_chip_state;
     if (!gs || !gs->fb_mem) return;
 
+    /* M2: while a full-screen 3D overlay (warp3d.library) owns the screen,
+     * present the overlay INSTEAD of converting/presenting the desktop.
+     * Doing both per frame makes the desktop flash through between the two
+     * presents (flicker); and on-demand flush_all calls (mouse, cursor blink)
+     * would otherwise present a desktop frame with no overlay at all. */
+    if (gs->v3d_overlay_active) {
+        chip_v3d_composite_overlay(gs);
+        return;
+    }
+
     uint32 w = gs->active_width  < gs->fb_width  ? gs->active_width  : gs->fb_width;
     uint32 h = gs->active_height < gs->fb_height ? gs->active_height : gs->fb_height;
     if (w == 0 || h == 0) return;
@@ -957,6 +967,8 @@ void chip_flush_task_entry(void)
             /* Phase 6 milestone: RGB 3D triangle via virgl DRAW_VBO. */
             chip_virgl_draw_test_triangle(gs);
         }
+        /* (v3d overlay compositing is handled inside chip_flush_all when a
+         * full-screen 3D context owns the screen.) */
 
         cycle++;
 

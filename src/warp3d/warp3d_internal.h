@@ -36,6 +36,16 @@ struct W3DVirgl {
     struct V3DContextInfo info;     /* handles into the chip's virgl pipeline */
     uint32 fb_w, fb_h;              /* drawregion dims for window->NDC mapping */
 
+    /* M2: own render target -- warp3d draws here, chip composites onto scanout */
+    uint32 rt_res;                  /* render-target resource (0 = none) */
+    uint32 rt_surface;             /* surface handle for binding as framebuffer */
+
+    /* Deferred clear: ClearDrawRegion records the colour; the next draw emits
+     * clear+draw in ONE submit so the chip's composite never observes the RT
+     * cleared-but-not-yet-drawn (which makes the geometry flicker). */
+    BOOL   pending_clear;
+    uint32 clear_argb;
+
     /* W3D state mirror (mostly inert in milestone 1) */
     uint32 state;                   /* W3D_* enable bits */
     uint32 src_blend, dst_blend;    /* W3D_SetBlendMode funcs */

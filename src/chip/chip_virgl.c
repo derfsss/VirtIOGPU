@@ -399,6 +399,11 @@ void virgl_cmd_draw_vbo(struct VirglCmdBuf *cbuf,
                          uint32 min_index, uint32 max_index,
                          uint32 cso_handle)
 {
+    /* The 12th payload word is count_from_stream_output, NOT a cso handle --
+     * DRAW_VBO has no cso field (verified vs mesa virgl_protocol.h /
+     * virgl_encode.c).  cso_handle is retained for API compatibility but is
+     * ignored; callers pass 0, which is the correct count_from_so value. */
+    (void)cso_handle;
     virgl_emit_dword(cbuf, VIRGL_CMD_HDR(VIRGL_CCMD_DRAW_VBO, 0, 12));
     virgl_emit_dword(cbuf, start);
     virgl_emit_dword(cbuf, count);
@@ -411,7 +416,7 @@ void virgl_cmd_draw_vbo(struct VirglCmdBuf *cbuf,
     virgl_emit_dword(cbuf, restart_index);
     virgl_emit_dword(cbuf, min_index);
     virgl_emit_dword(cbuf, max_index);
-    virgl_emit_dword(cbuf, cso_handle);
+    virgl_emit_dword(cbuf, 0);   /* count_from_stream_output */
 }
 
 /* -----------------------------------------------------------------------
@@ -463,39 +468,44 @@ void virgl_cmd_resource_inline_write(struct VirglCmdBuf *cbuf,
  * This is the primary mechanism for 2D blitting via the 3D pipeline.
  * Payload: 17 words.
  * ----------------------------------------------------------------------- */
+/* Boxes are pipe_box = {x, y, z, width, height, depth} (offset+size, NOT
+ * corner coords).  Layout verified against mesa virgl_protocol.h
+ * (VIRGL_CMD_BLIT_SIZE=21): S0, scissor_min, scissor_max, then per endpoint
+ *   RES_HANDLE, LEVEL, FORMAT, x,y,z,w,h,d
+ * (res handle FIRST, then level, then the full pipe_format value). */
 void virgl_cmd_blit(struct VirglCmdBuf *cbuf,
                      uint32 s0_flags,
                      uint32 dst_res, uint32 dst_format, uint32 dst_level,
-                     uint32 dst_x1, uint32 dst_y1, uint32 dst_z1,
-                     uint32 dst_x2, uint32 dst_y2, uint32 dst_z2,
+                     uint32 dx, uint32 dy, uint32 dz, uint32 dw, uint32 dh, uint32 dd,
                      uint32 src_res, uint32 src_format, uint32 src_level,
-                     uint32 src_x1, uint32 src_y1, uint32 src_z1,
-                     uint32 src_x2, uint32 src_y2, uint32 src_z2)
+                     uint32 sx, uint32 sy, uint32 sz, uint32 sw, uint32 sh, uint32 sd)
 {
-    virgl_emit_dword(cbuf, VIRGL_CMD_HDR(VIRGL_CCMD_BLIT, 0, 17));
-    virgl_emit_dword(cbuf, s0_flags);
+    virgl_emit_dword(cbuf, VIRGL_CMD_HDR(VIRGL_CCMD_BLIT, 0, 21));
+    virgl_emit_dword(cbuf, s0_flags);                 /* mask|filter|scissor_en */
+    virgl_emit_dword(cbuf, 0);                         /* scissor minx|(miny<<16) */
+    virgl_emit_dword(cbuf, 0);                         /* scissor maxx|(maxy<<16) */
 
-    /* Destination */
-    virgl_emit_dword(cbuf, VIRGL_BLIT_S1_DST_LEVEL(dst_level) |
-                           VIRGL_BLIT_S1_DST_FORMAT(dst_format));
+    /* Destination: res, level, format, box */
     virgl_emit_dword(cbuf, dst_res);
-    virgl_emit_dword(cbuf, dst_x1);
-    virgl_emit_dword(cbuf, dst_y1);
-    virgl_emit_dword(cbuf, dst_z1);
-    virgl_emit_dword(cbuf, dst_x2);
-    virgl_emit_dword(cbuf, dst_y2);
-    virgl_emit_dword(cbuf, dst_z2);
+    virgl_emit_dword(cbuf, dst_level);
+    virgl_emit_dword(cbuf, dst_format);
+    virgl_emit_dword(cbuf, dx);
+    virgl_emit_dword(cbuf, dy);
+    virgl_emit_dword(cbuf, dz);
+    virgl_emit_dword(cbuf, dw);
+    virgl_emit_dword(cbuf, dh);
+    virgl_emit_dword(cbuf, dd);
 
-    /* Source */
-    virgl_emit_dword(cbuf, VIRGL_BLIT_S1_DST_LEVEL(src_level) |
-                           VIRGL_BLIT_S1_DST_FORMAT(src_format));
+    /* Source: res, level, format, box */
     virgl_emit_dword(cbuf, src_res);
-    virgl_emit_dword(cbuf, src_x1);
-    virgl_emit_dword(cbuf, src_y1);
-    virgl_emit_dword(cbuf, src_z1);
-    virgl_emit_dword(cbuf, src_x2);
-    virgl_emit_dword(cbuf, src_y2);
-    virgl_emit_dword(cbuf, src_z2);
+    virgl_emit_dword(cbuf, src_level);
+    virgl_emit_dword(cbuf, src_format);
+    virgl_emit_dword(cbuf, sx);
+    virgl_emit_dword(cbuf, sy);
+    virgl_emit_dword(cbuf, sz);
+    virgl_emit_dword(cbuf, sw);
+    virgl_emit_dword(cbuf, sh);
+    virgl_emit_dword(cbuf, sd);
 }
 
 /* -----------------------------------------------------------------------

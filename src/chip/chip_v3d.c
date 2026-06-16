@@ -392,18 +392,26 @@ static BOOL v3d_PresentBitmap(struct V3DIFace *Self, APTR token, uint32 rt_res,
     virgl_cmd_blit(&cb, s0,
         gs->v3d_rb_res, PIPE_FORMAT_B8G8R8X8_UNORM, 0, 0, 0, 0, sw, sh, 1,
         rt_res,         PIPE_FORMAT_B8G8R8X8_UNORM, 0, 0, 0, 0, sw, sh, 1);
-    if (!chip_Submit3D(gs, gs->virgl_2d_ctx, cb.buf, cb.dwords * 4))
-        return FALSE;
+    {
+        static uint32 dbg = 0;
+        if (dbg < 3) { dbg++; DCHIP("v3d: Present blit ok, transferring %lux%lu",
+                                    (unsigned long)sw, (unsigned long)sh); }
+        if (!chip_Submit3D(gs, gs->virgl_2d_ctx, cb.buf, cb.dwords * 4))
+            return FALSE;
 
-    /* Pull the readback resource into guest memory, then reverse-convert it
-     * (B8G8R8X8 -> active RTG format) into the app's bitmap. */
-    chip_zero(&box, sizeof(box));
-    box.w = sw; box.h = sh; box.d = 1;
-    if (!chip_TransferFromHost3D(gs, gs->virgl_2d_ctx, gs->v3d_rb_res,
-            0, sw * 4, 0, 0, &box))
-        return FALSE;
+        /* Pull the readback resource into guest memory, then reverse-convert it
+         * (B8G8R8X8 -> active RTG format) into the app's bitmap. */
+        chip_zero(&box, sizeof(box));
+        box.w = sw; box.h = sh; box.d = 1;
+        if (!chip_TransferFromHost3D(gs, gs->virgl_2d_ctx, gs->v3d_rb_res,
+                0, sw * 4, 0, 0, &box))
+            return FALSE;
+        if (dbg <= 3) DCHIP("v3d: Present transfer ok, converting -> %p stride=%lu",
+                            dst_base, (unsigned long)dst_stride);
 
-    chip_b8x8_to_active_fmt(gs, gs->v3d_rb_mem, sw * 4, dst_base, dst_stride, sw, sh);
+        chip_b8x8_to_active_fmt(gs, gs->v3d_rb_mem, sw * 4, dst_base, dst_stride, sw, sh);
+        if (dbg <= 3) DCHIP("v3d: Present done");
+    }
     return TRUE;
 }
 

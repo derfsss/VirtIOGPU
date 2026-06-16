@@ -453,6 +453,8 @@ void chip_b8x8_to_active_fmt(struct ChipGPUState *gs,
     if (!gs || !src || !dst) return;
     rev = chip_pick_rev_converter(gs->active_format);
     if (!rev) return;
+    /* Never write past the destination row (each output pixel is 4 bytes). */
+    if (w > dst_stride / 4) w = dst_stride / 4;
     for (row = 0; row < h; row++)
         rev((const uint32 *)((const UBYTE *)src + row * src_stride),
             (uint32 *)((UBYTE *)dst + row * dst_stride), w);

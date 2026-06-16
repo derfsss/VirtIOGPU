@@ -34,18 +34,27 @@ static struct CyberGfxIFace *ensure_cybergfx(void)
     return g_ICyberGfx;
 }
 
-/* Lock an RTG bitmap and read base/stride/dims.  *lock_out must be released
- * with ICyberGfx->UnLockBitMap after the caller is done with base. */
-static BOOL bitmap_lock_info(struct BitMap *bm, APTR *lock_out, APTR *base,
-                             uint32 *bpr, uint32 *w, uint32 *h)
+/* Read an RTG bitmap's geometry (no lock needed -- the documented query API,
+ * which the CoW3D demo itself uses; LockBitMapTagList's LBMI_WIDTH proved
+ * unreliable, returning a padded/wrong width). */
+static BOOL bitmap_geometry(struct BitMap *bm, uint32 *w, uint32 *h, uint32 *bpr)
 {
     struct CyberGfxIFace *cg = ensure_cybergfx();
-    ULONG vbase = 0, vbpr = 0, vw = 0, vh = 0;
+    if (!cg || !bm) return FALSE;
+    if (w)   *w   = (uint32)cg->GetCyberMapAttr(bm, CYBRMATTR_WIDTH);
+    if (h)   *h   = (uint32)cg->GetCyberMapAttr(bm, CYBRMATTR_HEIGHT);
+    if (bpr) *bpr = (uint32)cg->GetCyberMapAttr(bm, CYBRMATTR_XMOD);
+    return TRUE;
+}
+
+/* Lock an RTG bitmap for its base address.  *lock_out must be released with
+ * ICyberGfx->UnLockBitMap once the caller is done writing to *base. */
+static BOOL bitmap_lock_base(struct BitMap *bm, APTR *lock_out, APTR *base)
+{
+    struct CyberGfxIFace *cg = ensure_cybergfx();
+    ULONG vbase = 0;
     struct TagItem qt[] = {
         { LBMI_BASEADDRESS, (Tag)&vbase },
-        { LBMI_BYTESPERROW, (Tag)&vbpr  },
-        { LBMI_WIDTH,       (Tag)&vw    },
-        { LBMI_HEIGHT,      (Tag)&vh    },
         { TAG_DONE, 0 }
     };
     APTR lock;
@@ -54,9 +63,6 @@ static BOOL bitmap_lock_info(struct BitMap *bm, APTR *lock_out, APTR *base,
     if (!lock) return FALSE;
     *lock_out = lock;
     if (base) *base = (APTR)vbase;
-    if (bpr)  *bpr  = (uint32)vbpr;
-    if (w)    *w    = (uint32)vw;
-    if (h)    *h    = (uint32)vh;
     return TRUE;
 }
 
@@ -275,12 +281,13 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
     wv->fb_w = wv->info.fb_width;
     wv->fb_h = wv->info.fb_height;
     {
-        APTR lk; uint32 bw = 0, bh = 0;
-        if (bm && bitmap_lock_info(bm, &lk, NULL, NULL, &bw, &bh)) {
-            g_ICyberGfx->UnLockBitMap(lk);
-            if (bw && bh) { wv->fb_w = bw; wv->fb_h = bh; }
+        uint32 bw = 0, bh = 0;
+        if (bm && bitmap_geometry(bm, &bw, &bh, NULL) && bw && bh) {
+            wv->fb_w = bw; wv->fb_h = bh;
         }
     }
+    DW3D("CreateContext: drawregion bitmap %lux%lu\n",
+         (unsigned long)wv->fb_w, (unsigned long)wv->fb_h);
 
     /* Heap command buffer for large indexed draws. */
     wv->cmdbuf = IExec->AllocVecTags(W3D_CMDBUF_DWORDS * 4,
@@ -906,22 +913,30 @@ uint32 w3d_Flush(struct Warp3DIFace *Self, W3D_Context *ctx)
 void w3d_FlushFrame(struct Warp3DIFace *Self, W3D_Context *ctx)
 {
     struct W3DVirgl *wv;
+    struct BitMap *bm;
     APTR lock, base;
-    uint32 bpr = 0;
+    uint32 bpr = 0, bw = 0, bh = 0, pw, ph;
     (void)Self;
 
     w3d_Flush(Self, ctx);            /* finish any pending clear */
     if (!ctx || !ctx->driver) return;
     wv = ctx->driver;
-    if (!g_IV3D || !g_IV3D->PresentBitmap) return;
+    if (!g_IV3D || !g_IV3D->PresentBitmap || !ctx->drawregion) return;
+    bm = (struct BitMap *)ctx->drawregion;
 
     /* Read the rendered RT back into the app's W3D_CC_BITMAP so its
-     * BltBitMapRastPort picks up the 3D frame.  Lock for the base address. */
-    if (ctx->drawregion &&
-        bitmap_lock_info((struct BitMap *)ctx->drawregion, &lock, &base, &bpr, NULL, NULL)) {
-        if (base && bpr)
+     * BltBitMapRastPort picks up the 3D frame.  Clamp the presented rect to
+     * the bitmap's real geometry (stride/dims) so we never write out of
+     * bounds into adjacent card memory. */
+    if (!bitmap_geometry(bm, &bw, &bh, &bpr) || !bpr) return;
+    pw = wv->fb_w; if (bw && pw > bw) pw = bw; if (pw > bpr / 4) pw = bpr / 4;
+    ph = wv->fb_h; if (bh && ph > bh) ph = bh;
+    if (!pw || !ph) return;
+
+    if (bitmap_lock_base(bm, &lock, &base)) {
+        if (base)
             g_IV3D->PresentBitmap(g_IV3D, wv->info.token, wv->rt_res[wv->draw_idx],
-                                  wv->fb_w, wv->fb_h, base, bpr);
+                                  pw, ph, base, bpr);
         g_ICyberGfx->UnLockBitMap(lock);
     }
 }

@@ -324,6 +324,89 @@ void chip_v3d_composite_overlay(struct ChipGPUState *gs)
     }
 }
 
+/* Milestone 3: read a render target back into a windowed app's bitmap.
+ * No overlay -- the app blits the bitmap into its own window. */
+static BOOL v3d_PresentBitmap(struct V3DIFace *Self, APTR token, uint32 rt_res,
+                              uint32 sw, uint32 sh,
+                              APTR dst_base, uint32 dst_stride)
+{
+    struct ChipGPUState *gs = (struct ChipGPUState *)token;
+    struct ExecIFace *IExec;
+    uint32 words[32];
+    struct VirglCmdBuf cb;
+    struct virtio_gpu_box box;
+    uint32 s0;
+    (void)Self;
+
+    if (!gs || !dst_base || !sw || !sh) return FALSE;
+    if (!gs->virgl_2d_ready || gs->virgl_ctx_error) return FALSE;
+    IExec = gs->IExec;
+
+    /* (Re)create the readback resource + DMA buffer when the size changes. */
+    if (gs->v3d_rb_res == 0 || gs->v3d_rb_w != sw || gs->v3d_rb_h != sh) {
+        APTR mem; uint32 n, res; struct DMAEntry *dma;
+        if (gs->v3d_rb_mem) {
+            chip_dma_free(IExec, gs->v3d_rb_mem,
+                          gs->v3d_rb_w * gs->v3d_rb_h * 4);
+            gs->v3d_rb_mem = NULL;
+        }
+        if (gs->v3d_rb_res) { chip_ResourceUnref(gs, gs->v3d_rb_res); gs->v3d_rb_res = 0; }
+
+        mem = IExec->AllocVecTags(sw * sh * 4,
+                AVT_Type, MEMF_SHARED, AVT_Alignment, 4096,
+                AVT_Contiguous, TRUE, AVT_ClearWithValue, 0, TAG_END);
+        if (!mem) return FALSE;
+        n = IExec->StartDMA(mem, sw * sh * 4, DMA_ReadFromRAM);
+        if (n == 0) { IExec->FreeVec(mem); return FALSE; }
+        dma = (struct DMAEntry *)IExec->AllocSysObjectTags(
+                ASOT_DMAENTRY, ASODMAE_NumEntries, n, TAG_DONE);
+        if (!dma) {
+            IExec->EndDMA(mem, sw * sh * 4, DMA_ReadFromRAM | DMAF_NoModify);
+            IExec->FreeVec(mem); return FALSE;
+        }
+        IExec->GetDMAList(mem, sw * sh * 4, DMA_ReadFromRAM, dma);
+
+        res = chip_alloc_resource_id(gs);
+        if (!chip_ResourceCreate3D(gs, res, PIPE_TEXTURE_2D,
+                PIPE_FORMAT_B8G8R8X8_UNORM,
+                PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW,
+                sw, sh, 1, 1, 0, 0, 0) ||
+            !chip_ResourceAttachBacking(gs, res, dma, n)) {
+            IExec->FreeSysObject(ASOT_DMAENTRY, dma);
+            IExec->EndDMA(mem, sw * sh * 4, DMA_ReadFromRAM | DMAF_NoModify);
+            IExec->FreeVec(mem);
+            return FALSE;
+        }
+        IExec->FreeSysObject(ASOT_DMAENTRY, dma);   /* StartDMA stays open */
+        chip_CTXAttachResource(gs, gs->virgl_2d_ctx, res);
+        gs->v3d_rb_res = res; gs->v3d_rb_mem = mem;
+        gs->v3d_rb_w = sw;    gs->v3d_rb_h = sh;
+        DCHIP("v3d: PresentBitmap readback res=%lu %lux%lu",
+              (unsigned long)res, (unsigned long)sw, (unsigned long)sh);
+    }
+
+    /* BLIT the warp3d RT into the readback resource (1:1, both B8G8R8X8). */
+    s0 = VIRGL_BLIT_S0_MASK(PIPE_MASK_RGBA) |
+         VIRGL_BLIT_S0_FILTER(PIPE_TEX_FILTER_NEAREST);
+    virgl_cmd_init(&cb, words, 32);
+    virgl_cmd_blit(&cb, s0,
+        gs->v3d_rb_res, PIPE_FORMAT_B8G8R8X8_UNORM, 0, 0, 0, 0, sw, sh, 1,
+        rt_res,         PIPE_FORMAT_B8G8R8X8_UNORM, 0, 0, 0, 0, sw, sh, 1);
+    if (!chip_Submit3D(gs, gs->virgl_2d_ctx, cb.buf, cb.dwords * 4))
+        return FALSE;
+
+    /* Pull the readback resource into guest memory, then reverse-convert it
+     * (B8G8R8X8 -> active RTG format) into the app's bitmap. */
+    chip_zero(&box, sizeof(box));
+    box.w = sw; box.h = sh; box.d = 1;
+    if (!chip_TransferFromHost3D(gs, gs->virgl_2d_ctx, gs->v3d_rb_res,
+            0, sw * 4, 0, 0, &box))
+        return FALSE;
+
+    chip_b8x8_to_active_fmt(gs, gs->v3d_rb_mem, sw * 4, dst_base, dst_stride, sw, sh);
+    return TRUE;
+}
+
 /* Vector table -- order MUST match struct V3DIFace in v3d_iface.h. */
 const APTR _chip_v3d_Vectors[] __attribute__((used)) =
 {
@@ -340,6 +423,7 @@ const APTR _chip_v3d_Vectors[] __attribute__((used)) =
     (APTR)v3d_AllocDepthBuffer, /* slot[11] */
     (APTR)v3d_CreateTexture,    /* slot[12] */
     (APTR)v3d_FreeTexture,      /* slot[13] */
+    (APTR)v3d_PresentBitmap,    /* slot[14] */
     (APTR)-1                    /* sentinel */
 };
 const struct TagItem _chip_v3d_Tags[] __attribute__((used)) =

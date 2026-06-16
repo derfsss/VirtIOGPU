@@ -528,6 +528,13 @@ struct ChipGPUState {
     uint32  v3d_overlay_sw, v3d_overlay_sh; /* RT (src) dims */
     uint32  v3d_next_handle;    /* virgl object handle allocator for v3d (>=200) */
 
+    /* v3d PresentBitmap -- readback resource + DMA buffer (B8G8R8X8) used to
+     * pull a warp3d RT back to guest memory before reverse-converting it into
+     * a windowed app's bitmap.  Allocated lazily, resized when dims change. */
+    uint32  v3d_rb_res;
+    APTR    v3d_rb_mem;
+    uint32  v3d_rb_w, v3d_rb_h;
+
     /* Compositing -- temporary texture for source bitmap upload.
      * A single temp resource + sampler view is allocated per compositing
      * call and freed afterwards.  Handles are recycled from the pool. */
@@ -635,6 +642,17 @@ void chip_v3d_composite_overlay(struct ChipGPUState *gs);
  * P96 RTG bitmap) so ReadPixelArray/screenshots and real-HW scanout see it. */
 void chip_overlay_to_board(struct ChipGPUState *gs, uint32 x, uint32 y,
                            uint32 w, uint32 h);
+
+/* chip_flush.c -- reverse-convert a B8G8R8X8 buffer into the active RTG format
+ * (used by v3d PresentBitmap to write a render target into an app bitmap). */
+void chip_b8x8_to_active_fmt(struct ChipGPUState *gs,
+                             const void *src, uint32 src_stride,
+                             void *dst, uint32 dst_stride, uint32 w, uint32 h);
+
+/* chip_init.c -- page-aligned contiguous DMA buffer alloc/free (public so
+ * chip_v3d.c can allocate a readback buffer for PresentBitmap). */
+APTR chip_dma_alloc(struct ExecIFace *IExec, uint32 size, uint32 *phys_out);
+void chip_dma_free(struct ExecIFace *IExec, APTR mem, uint32 size);
 
 /* chip_composite.c -- 32bpp texture strip upload (shared with chip_v3d.c). */
 BOOL chip_comp_upload_pixels_32bpp(struct ChipGPUState *gs,

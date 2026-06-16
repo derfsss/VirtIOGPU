@@ -13,6 +13,52 @@
  */
 #include "warp3d_internal.h"
 #include <stdarg.h>
+#include <cybergraphx/cybergraphics.h>
+#include <interfaces/cybergraphics.h>
+
+/* cybergraphics.library -- used to lock the W3D_CC_BITMAP and read its base
+ * address / stride / dims, so we render at the app bitmap's size and present
+ * the rendered frame straight into it (the app then blits it to its window). */
+static struct Library       *g_CyberGfxBase = NULL;
+static struct CyberGfxIFace *g_ICyberGfx    = NULL;
+
+static struct CyberGfxIFace *ensure_cybergfx(void)
+{
+    if (!g_ICyberGfx) {
+        if (!g_CyberGfxBase)
+            g_CyberGfxBase = IExec->OpenLibrary("cybergraphics.library", 41);
+        if (g_CyberGfxBase)
+            g_ICyberGfx = (struct CyberGfxIFace *)
+                IExec->GetInterface(g_CyberGfxBase, "main", 1, NULL);
+    }
+    return g_ICyberGfx;
+}
+
+/* Lock an RTG bitmap and read base/stride/dims.  *lock_out must be released
+ * with ICyberGfx->UnLockBitMap after the caller is done with base. */
+static BOOL bitmap_lock_info(struct BitMap *bm, APTR *lock_out, APTR *base,
+                             uint32 *bpr, uint32 *w, uint32 *h)
+{
+    struct CyberGfxIFace *cg = ensure_cybergfx();
+    ULONG vbase = 0, vbpr = 0, vw = 0, vh = 0;
+    struct TagItem qt[] = {
+        { LBMI_BASEADDRESS, (Tag)&vbase },
+        { LBMI_BYTESPERROW, (Tag)&vbpr  },
+        { LBMI_WIDTH,       (Tag)&vw    },
+        { LBMI_HEIGHT,      (Tag)&vh    },
+        { TAG_DONE, 0 }
+    };
+    APTR lock;
+    if (!cg || !bm) return FALSE;
+    lock = cg->LockBitMapTagList(bm, qt);
+    if (!lock) return FALSE;
+    *lock_out = lock;
+    if (base) *base = (APTR)vbase;
+    if (bpr)  *bpr  = (uint32)vbpr;
+    if (w)    *w    = (uint32)vw;
+    if (h)    *h    = (uint32)vh;
+    return TRUE;
+}
 
 /* Dependency-free tag scan (GetTagData lives in IUtility, which we don't
  * open).  Handles TAG_DONE/TAG_END, TAG_IGNORE, TAG_SKIP and TAG_MORE. */
@@ -98,13 +144,9 @@ static void bind_rt_framebuffer(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
  * colour so the next draw clears the new (now-back) buffer. */
 static void frame_clear(struct W3DVirgl *wv, uint32 argb)
 {
-    if (wv->drawn_since_clear && g_IV3D) {
-        g_IV3D->RegisterOverlay(g_IV3D, wv->info.token,
-                                wv->rt_res[wv->draw_idx],
-                                wv->fb_w, wv->fb_h, 0, 0, wv->fb_w, wv->fb_h, TRUE);
-        wv->draw_idx ^= 1;
-        wv->drawn_since_clear = FALSE;
-    }
+    /* M3: single render target presented into the app bitmap on FlushFrame --
+     * the clear is deferred and emitted with the next draw (one atomic submit). */
+    wv->drawn_since_clear = FALSE;
     wv->pending_clear = TRUE;
     wv->clear_argb    = argb;
 }
@@ -227,8 +269,18 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
         return NULL;
     }
 
+    /* Render at the W3D_CC_BITMAP's dimensions (a windowed app draws into its
+     * own off-screen bitmap, e.g. 640x480), NOT the chip's full scanout size.
+     * Falls back to the scanout dims if the bitmap can't be queried. */
     wv->fb_w = wv->info.fb_width;
     wv->fb_h = wv->info.fb_height;
+    {
+        APTR lk; uint32 bw = 0, bh = 0;
+        if (bm && bitmap_lock_info(bm, &lk, NULL, NULL, &bw, &bh)) {
+            g_ICyberGfx->UnLockBitMap(lk);
+            if (bw && bh) { wv->fb_w = bw; wv->fb_h = bh; }
+        }
+    }
 
     /* Heap command buffer for large indexed draws. */
     wv->cmdbuf = IExec->AllocVecTags(W3D_CMDBUF_DWORDS * 4,
@@ -282,9 +334,10 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
             g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id, cb.buf, cb.dwords);
         }
     }
-    /* Show buffer 1 initially (buffer 0 is the first back buffer). */
-    g_IV3D->RegisterOverlay(g_IV3D, wv->info.token, wv->rt_res[1],
-                            wv->fb_w, wv->fb_h, 0, 0, wv->fb_w, wv->fb_h, TRUE);
+    /* M3: no scanout overlay -- warp3d renders into rt_res[0] and presents it
+     * straight into the app's W3D_CC_BITMAP on FlushFrame; the app blits that
+     * bitmap into its own window. */
+    wv->draw_idx = 0;
 
     ctx->driver     = wv;
     ctx->drivertype = W3D_DRIVER_3DHW;
@@ -852,6 +905,23 @@ uint32 w3d_Flush(struct Warp3DIFace *Self, W3D_Context *ctx)
 
 void w3d_FlushFrame(struct Warp3DIFace *Self, W3D_Context *ctx)
 {
+    struct W3DVirgl *wv;
+    APTR lock, base;
+    uint32 bpr = 0;
     (void)Self;
-    w3d_Flush(Self, ctx);
+
+    w3d_Flush(Self, ctx);            /* finish any pending clear */
+    if (!ctx || !ctx->driver) return;
+    wv = ctx->driver;
+    if (!g_IV3D || !g_IV3D->PresentBitmap) return;
+
+    /* Read the rendered RT back into the app's W3D_CC_BITMAP so its
+     * BltBitMapRastPort picks up the 3D frame.  Lock for the base address. */
+    if (ctx->drawregion &&
+        bitmap_lock_info((struct BitMap *)ctx->drawregion, &lock, &base, &bpr, NULL, NULL)) {
+        if (base && bpr)
+            g_IV3D->PresentBitmap(g_IV3D, wv->info.token, wv->rt_res[wv->draw_idx],
+                                  wv->fb_w, wv->fb_h, base, bpr);
+        g_ICyberGfx->UnLockBitMap(lock);
+    }
 }

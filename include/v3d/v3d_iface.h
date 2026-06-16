@@ -109,6 +109,19 @@ struct V3DIFace {
     /* Destroy a texture's sampler view + resource. */
     void (*FreeTexture)(struct V3DIFace *Self, APTR token,
                         uint32 res, uint32 view);
+
+    /* --- Milestone 3: present into a windowed app's W3D_CC_BITMAP --- */
+
+    /* Read render target rt_res (sw x sh, B8G8R8X8) back into a CPU bitmap at
+     * dst_base (dst_stride bytes/row).  The chip BLITs the RT into an internal
+     * readback resource, TRANSFER_FROM_HOST_3D's it to guest memory, then
+     * reverse-converts (B8G8R8X8 -> the active RTG format) into dst_base.  This
+     * is how a windowed Warp3D app's off-screen bitmap receives the 3D output;
+     * the app then blits that bitmap into its window itself.  No overlay /
+     * scanout compositing.  Returns TRUE on success. */
+    BOOL (*PresentBitmap)(struct V3DIFace *Self, APTR token, uint32 rt_res,
+                          uint32 sw, uint32 sh,
+                          APTR dst_base, uint32 dst_stride);
 };
 
 #endif /* V3D_IFACE_H */

@@ -20,7 +20,7 @@
  * The StartDMA mapping is therefore intentionally held open.  On init
  * failure, callers MUST invoke chip_dma_free() to unwind properly.
  * ----------------------------------------------------------------------- */
-static APTR chip_dma_alloc(struct ExecIFace *IExec, uint32 size, uint32 *phys_out)
+APTR chip_dma_alloc(struct ExecIFace *IExec, uint32 size, uint32 *phys_out)
 {
     APTR mem = IExec->AllocVecTags(size,
         AVT_Type,           MEMF_SHARED,
@@ -76,7 +76,7 @@ static APTR chip_dma_alloc(struct ExecIFace *IExec, uint32 size, uint32 *phys_ou
  * chip_dma_free -- reverse of chip_dma_alloc.  Balances StartDMA with
  * EndDMA, then frees the buffer.  NULL-safe: no-op on NULL mem.
  * ----------------------------------------------------------------------- */
-static void chip_dma_free(struct ExecIFace *IExec, APTR mem, uint32 size)
+void chip_dma_free(struct ExecIFace *IExec, APTR mem, uint32 size)
 {
     if (!mem) return;
     IExec->EndDMA(mem, size, DMA_ReadFromRAM | DMAF_NoModify);

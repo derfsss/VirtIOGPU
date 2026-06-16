@@ -442,6 +442,22 @@ static rev_conv_fn chip_pick_rev_converter(RGBFTYPE fmt)
     }
 }
 
+/* Reverse-convert a B8G8R8X8 source buffer into dst (the active RTG format).
+ * Used to present a warp3d render target into a windowed app's bitmap. */
+void chip_b8x8_to_active_fmt(struct ChipGPUState *gs,
+                             const void *src, uint32 src_stride,
+                             void *dst, uint32 dst_stride, uint32 w, uint32 h)
+{
+    rev_conv_fn rev;
+    uint32 row;
+    if (!gs || !src || !dst) return;
+    rev = chip_pick_rev_converter(gs->active_format);
+    if (!rev) return;
+    for (row = 0; row < h; row++)
+        rev((const uint32 *)((const UBYTE *)src + row * src_stride),
+            (uint32 *)((UBYTE *)dst + row * dst_stride), w);
+}
+
 /* -----------------------------------------------------------------------
  * chip_overlay_to_board -- read the composited overlay frame back from the
  * scanout GPU resource into fb_mem, then reverse-convert it into board_mem

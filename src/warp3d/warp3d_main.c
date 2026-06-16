@@ -84,8 +84,29 @@ static void upload_vertex_floats(struct VirglCmdBuf *cbuf, uint32 res_handle,
  * scanout each frame, so 3D coexists with the desktop without flicker. */
 static void bind_rt_framebuffer(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
 {
-    uint32 surf = wv->rt_surface;
-    virgl_cmd_set_framebuffer_state(cbuf, 1, 0, &surf);
+    uint32 surf = wv->rt_surface[wv->draw_idx];
+    /* colour surface + depth (zsurf) so the depth test has a buffer */
+    virgl_cmd_set_framebuffer_state(cbuf, 1, wv->zsurf, &surf);
+    /* bind our depth-test DSA (the chip's default DSA has depth off) */
+    if (wv->dsa_handle)
+        virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_DSA, wv->dsa_handle);
+}
+
+/* Frame boundary (called from ClearBuffers/ClearDrawRegion): if geometry was
+ * drawn since the last clear, the current back buffer now holds a COMPLETE
+ * frame -- register it as the overlay and swap buffers.  Then record the clear
+ * colour so the next draw clears the new (now-back) buffer. */
+static void frame_clear(struct W3DVirgl *wv, uint32 argb)
+{
+    if (wv->drawn_since_clear && g_IV3D) {
+        g_IV3D->RegisterOverlay(g_IV3D, wv->info.token,
+                                wv->rt_res[wv->draw_idx],
+                                wv->fb_w, wv->fb_h, 0, 0, wv->fb_w, wv->fb_h, TRUE);
+        wv->draw_idx ^= 1;
+        wv->drawn_since_clear = FALSE;
+    }
+    wv->pending_clear = TRUE;
+    wv->clear_argb    = argb;
 }
 
 /* Encode FB-bind + shaders + upload + set-vbuf + draw into the RT, then submit.
@@ -109,7 +130,7 @@ static uint32 draw_packed(struct W3DVirgl *wv, const float *verts,
         float cg = (float)((wv->clear_argb >>  8) & 0xFF) / 255.0f;
         float cb = (float)((wv->clear_argb      ) & 0xFF) / 255.0f;
         float ca = (float)((wv->clear_argb >> 24) & 0xFF) / 255.0f;
-        virgl_cmd_clear(&cbuf, 4 /*PIPE_CLEAR_COLOR0*/, cr, cg, cb, ca, 1.0, 0);
+        virgl_cmd_clear(&cbuf, 5 /*COLOR0|DEPTH*/, cr, cg, cb, ca, 1.0, 0);
         wv->pending_clear = FALSE;
     }
 
@@ -137,6 +158,7 @@ static uint32 draw_packed(struct W3DVirgl *wv, const float *verts,
         DW3D("draw_packed: Submit FAILED (%lu verts)\n", (unsigned long)nverts);
         return (uint32)-1;
     }
+    wv->drawn_since_clear = TRUE;
     return W3D_SUCCESS;
 }
 
@@ -218,18 +240,50 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
         return NULL;
     }
 
-    /* M2: allocate our own render target (drawregion-sized) and register it as
-     * a scanout overlay.  warp3d renders into the RT; the chip composites it
-     * onto the scanout every frame -> stable, flicker-free. */
+    /* M2/M3: allocate TWO render targets (double-buffer) and register one as
+     * the scanout overlay.  warp3d draws into the back buffer; on each frame's
+     * clear the completed buffer becomes the overlay and the buffers swap, so
+     * the chip only ever composites a complete frame (flicker-free). */
     if (!g_IV3D->AllocRenderTarget(g_IV3D, wv->info.token, wv->fb_w, wv->fb_h,
-                                   &wv->rt_res, &wv->rt_surface)) {
+                                   &wv->rt_res[0], &wv->rt_surface[0]) ||
+        !g_IV3D->AllocRenderTarget(g_IV3D, wv->info.token, wv->fb_w, wv->fb_h,
+                                   &wv->rt_res[1], &wv->rt_surface[1])) {
         DW3D("CreateContext: AllocRenderTarget failed\n");
+        IExec->FreeVec(wv->cmdbuf);
         IExec->FreeVec(ctx);
         IExec->FreeVec(wv);
         if (error) *error = W3D_NOMEMORY;
         return NULL;
     }
-    g_IV3D->RegisterOverlay(g_IV3D, wv->info.token, wv->rt_res,
+    wv->draw_idx = 0;               /* draw into buffer 0 first */
+    wv->drawn_since_clear = FALSE;
+
+    /* Shared depth buffer + a depth-test DSA (LESS, write enabled) so the cow
+     * surfaces occlude correctly regardless of triangle draw order. */
+    if (g_IV3D->AllocDepthBuffer(g_IV3D, wv->info.token, wv->fb_w, wv->fb_h,
+                                 &wv->zres, &wv->zsurf)) {
+        uint32 dw[16]; struct VirglCmdBuf dcb;
+        wv->dsa_handle = 300;       /* warp3d object handle range (>= chip's) */
+        virgl_cmd_init(&dcb, dw, 16);
+        virgl_cmd_create_dsa(&dcb, wv->dsa_handle,
+            VIRGL_DSA_S0_DEPTH_ENABLE(1) | VIRGL_DSA_S0_DEPTH_WRITEMASK(1) |
+            VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_LESS), 0, 0, 0.0f);
+        g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id, dcb.buf, dcb.dwords);
+    }
+
+    /* Clear both buffers (colour+depth) so neither shows garbage initially. */
+    {
+        uint32 cw[16]; struct VirglCmdBuf cb; int b;
+        for (b = 0; b < 2; b++) {
+            uint32 surf = wv->rt_surface[b];
+            virgl_cmd_init(&cb, cw, 16);
+            virgl_cmd_set_framebuffer_state(&cb, 1, wv->zsurf, &surf);
+            virgl_cmd_clear(&cb, 5, 0.0f, 0.0f, 0.0f, 1.0f, 1.0, 0);
+            g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id, cb.buf, cb.dwords);
+        }
+    }
+    /* Show buffer 1 initially (buffer 0 is the first back buffer). */
+    g_IV3D->RegisterOverlay(g_IV3D, wv->info.token, wv->rt_res[1],
                             wv->fb_w, wv->fb_h, 0, 0, wv->fb_w, wv->fb_h, TRUE);
 
     ctx->driver     = wv;
@@ -285,11 +339,15 @@ void w3d_DestroyContext(struct Warp3DIFace *Self, W3D_Context *ctx)
     if (ctx->driver) {
         struct W3DVirgl *wv = ctx->driver;
         if (g_IV3D) {
-            if (wv->rt_res)
-                g_IV3D->RegisterOverlay(g_IV3D, wv->info.token, wv->rt_res,
-                                        0, 0, 0, 0, 0, 0, FALSE);
+            g_IV3D->RegisterOverlay(g_IV3D, wv->info.token, 0,
+                                    0, 0, 0, 0, 0, 0, FALSE);
             g_IV3D->FreeRenderTarget(g_IV3D, wv->info.token,
-                                     wv->rt_res, wv->rt_surface);
+                                     wv->rt_res[0], wv->rt_surface[0]);
+            g_IV3D->FreeRenderTarget(g_IV3D, wv->info.token,
+                                     wv->rt_res[1], wv->rt_surface[1]);
+            if (wv->zres)
+                g_IV3D->FreeRenderTarget(g_IV3D, wv->info.token,
+                                         wv->zres, wv->zsurf);
             g_IV3D->ReleaseContext(g_IV3D, wv->info.token);
         }
         if (wv->cmdbuf) IExec->FreeVec(wv->cmdbuf);
@@ -331,7 +389,10 @@ uint32 w3d_CheckDriver(struct Warp3DIFace *Self)
 uint32 w3d_LockHardware(struct Warp3DIFace *Self, W3D_Context *ctx)
 {
     (void)Self; (void)ctx;
-    return TRUE;   /* serialisation is handled chip-side via io_lock */
+    /* Apps test `if (W3D_SUCCESS != W3D_LockHardware(ctx)) bail;` -- must
+     * return W3D_SUCCESS (0) on success, NOT TRUE.  (Serialisation is handled
+     * chip-side via io_lock, so this is just a success ack.) */
+    return W3D_SUCCESS;
 }
 void w3d_UnLockHardware(struct Warp3DIFace *Self, W3D_Context *ctx) { (void)Self; (void)ctx; }
 void w3d_WaitIdle(struct Warp3DIFace *Self, W3D_Context *ctx)       { (void)Self; (void)ctx; }
@@ -521,7 +582,7 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
         float cg = (float)((wv->clear_argb >>  8) & 0xFF) / 255.0f;
         float cb = (float)((wv->clear_argb      ) & 0xFF) / 255.0f;
         float ca = (float)((wv->clear_argb >> 24) & 0xFF) / 255.0f;
-        virgl_cmd_clear(&cbuf, 4, cr, cg, cb, ca, 1.0, 0);
+        virgl_cmd_clear(&cbuf, 5, cr, cg, cb, ca, 1.0, 0);
         wv->pending_clear = FALSE;
     }
 
@@ -549,9 +610,10 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
         {
             float x = *(const float *)(v + 0);
             float y = *(const float *)(v + 4);
+            float z = *(const float *)(v + 8);   /* screen z (~[0,0.8]) */
             virgl_emit_float(&cbuf, 2.0f * x / fbw - 1.0f);   /* ndc x */
             virgl_emit_float(&cbuf, 2.0f * y / fbh - 1.0f);   /* ndc y */
-            virgl_emit_float(&cbuf, 0.0f);                    /* ndc z (depth: M3 #30) */
+            virgl_emit_float(&cbuf, z);                       /* ndc z -> depth */
             virgl_emit_float(&cbuf, 1.0f);                    /* w */
         }
         if (wv->ia_has_color) {
@@ -580,9 +642,11 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
 {
     struct W3DVirgl *wv;
     uint32 idx_size, pipe_prim, done;
-    /* Cap each submit so INLINE_WRITE + draw fit the 64 KiB SUBMIT_3D buffer:
-     * 11 + nverts*8 + ~40 overhead <= 16384 dwords -> nverts <= ~2040. */
-    const uint32 CHUNK = 2000;
+    /* Cap each submit so INLINE_WRITE + draw fit the 64 KiB SUBMIT_3D buffer
+     * (11 + nverts*8 + overhead <= 16384 dwords).  MUST be a multiple of 3 for
+     * TRIANGLES so we never split a triangle across submit chunks (doing so
+     * produces garbage triangles spanning the mesh). */
+    const uint32 CHUNK = 1998;
     (void)Self;
 
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
@@ -593,6 +657,31 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
     idx_size  = (type == W3D_INDEX_ULONG) ? 4 : (type == W3D_INDEX_UWORD) ? 2 : 1;
     pipe_prim = w3d_pipe_prim(prim);
 
+    {
+        static uint32 once = 0;
+        if (!once) {
+            once = 1;
+            /* log the first vertex's screen coords -> ndc (milli-units, no %f) */
+            const W3D_Vertex *dummy = NULL; (void)dummy;
+            if (wv->ia_ptr && wv->ia_stride) {
+                const UBYTE *v0 = wv->ia_ptr +
+                    (idx_size == 4 ? ((const uint32 *)indices)[0] :
+                     idx_size == 2 ? ((const UWORD *)indices)[0] :
+                                     ((const UBYTE *)indices)[0]) * (uint32)wv->ia_stride;
+                float x0 = *(const float *)(v0 + 0);
+                float y0 = *(const float *)(v0 + 4);
+                DW3D("DrawElements: FIRST prim=%lu count=%lu stride=%ld colorOff=%ld "
+                     "fb=%lux%lu v0=(%ld,%ld) ndc*1000=(%ld,%ld)\n",
+                     (unsigned long)prim, (unsigned long)count,
+                     (long)wv->ia_stride, (long)wv->ia_color_off,
+                     (unsigned long)wv->fb_w, (unsigned long)wv->fb_h,
+                     (long)x0, (long)y0,
+                     (long)((2.0f * x0 / (float)wv->fb_w - 1.0f) * 1000.0f),
+                     (long)((2.0f * y0 / (float)wv->fb_h - 1.0f) * 1000.0f));
+            }
+        }
+    }
+
     for (done = 0; done < count; done += CHUNK) {
         uint32 n = count - done;
         if (n > CHUNK) n = CHUNK;
@@ -602,6 +691,7 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
                  (unsigned long)done, (unsigned long)count);
             return (uint32)-1;
         }
+        wv->drawn_since_clear = TRUE;
     }
     return W3D_SUCCESS;
 }
@@ -614,10 +704,8 @@ uint32 w3d_ClearDrawRegion(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 co
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
 
-    /* Record the clear (0xAARRGGBB); the next draw emits it in the same submit
-     * as the geometry so the composite never sees a cleared-but-empty RT. */
-    wv->pending_clear = TRUE;
-    wv->clear_argb    = color;
+    /* Frame boundary: swap completed buffer to the overlay, clear the new back. */
+    frame_clear(wv, color);
     return W3D_SUCCESS;
 }
 
@@ -636,11 +724,10 @@ uint32 w3d_ClearBuffers(struct Warp3DIFace *Self, W3D_Context *ctx,
         r = (uint32)(color->r * 255.0f) & 0xFF;
         g = (uint32)(color->g * 255.0f) & 0xFF;
         b = (uint32)(color->b * 255.0f) & 0xFF;
-        wv->clear_argb = (a << 24) | (r << 16) | (g << 8) | b;
+        frame_clear(wv, (a << 24) | (r << 16) | (g << 8) | b);
     } else {
-        wv->clear_argb = 0xFF000000;
+        frame_clear(wv, 0xFF000000);
     }
-    wv->pending_clear = TRUE;
     return W3D_SUCCESS;
 }
 
@@ -663,7 +750,7 @@ uint32 w3d_Flush(struct Warp3DIFace *Self, W3D_Context *ctx)
         float ca = (float)((wv->clear_argb >> 24) & 0xFF) / 255.0f;
         virgl_cmd_init(&cbuf, cmd_words, 16);
         bind_rt_framebuffer(&cbuf, wv);
-        virgl_cmd_clear(&cbuf, 4 /*PIPE_CLEAR_COLOR0*/, cr, cg, cb, ca, 1.0, 0);
+        virgl_cmd_clear(&cbuf, 5 /*COLOR0|DEPTH*/, cr, cg, cb, ca, 1.0, 0);
         g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id,
                        cbuf.buf, cbuf.dwords);
         wv->pending_clear = FALSE;

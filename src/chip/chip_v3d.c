@@ -132,6 +132,43 @@ static BOOL v3d_AllocRenderTarget(struct V3DIFace *Self, APTR token,
     return TRUE;
 }
 
+static BOOL v3d_AllocDepthBuffer(struct V3DIFace *Self, APTR token,
+                                 uint32 w, uint32 h,
+                                 uint32 *res_out, uint32 *surface_out)
+{
+    struct ChipGPUState *gs = (struct ChipGPUState *)token;
+    uint32 res, surf, words[16];
+    struct VirglCmdBuf cb;
+    (void)Self;
+
+    if (!gs || !res_out || !surface_out || !w || !h) return FALSE;
+    if (!gs->virgl_2d_ready || gs->virgl_ctx_error)   return FALSE;
+
+    res = chip_alloc_resource_id(gs);
+    if (!chip_ResourceCreate3D(gs, res, PIPE_TEXTURE_2D,
+            PIPE_FORMAT_Z24X8_UNORM, PIPE_BIND_DEPTH_STENCIL,
+            w, h, 1, 1, 0, 0, 0)) {
+        DCHIP("v3d: AllocDepthBuffer RESOURCE_CREATE_3D failed");
+        return FALSE;
+    }
+    chip_CTXAttachResource(gs, gs->virgl_2d_ctx, res);
+
+    surf = v3d_handle(gs);
+    virgl_cmd_init(&cb, words, 16);
+    virgl_cmd_create_surface(&cb, surf, res, PIPE_FORMAT_Z24X8_UNORM, 0, 0);
+    if (!chip_Submit3D(gs, gs->virgl_2d_ctx, cb.buf, cb.dwords * 4)) {
+        DCHIP("v3d: AllocDepthBuffer create_surface FAILED");
+        chip_ResourceUnref(gs, res);
+        return FALSE;
+    }
+    *res_out     = res;
+    *surface_out = surf;
+    DCHIP("v3d: AllocDepthBuffer -> res=%lu zsurf=%lu %lux%lu",
+          (unsigned long)res, (unsigned long)surf,
+          (unsigned long)w, (unsigned long)h);
+    return TRUE;
+}
+
 static void v3d_RegisterOverlay(struct V3DIFace *Self, APTR token,
                                 uint32 rt_res, uint32 sw, uint32 sh,
                                 uint32 x, uint32 y, uint32 w, uint32 h,
@@ -228,12 +265,14 @@ const APTR _chip_v3d_Vectors[] __attribute__((used)) =
     (APTR)v3d_AllocRenderTarget,/* slot[8] */
     (APTR)v3d_RegisterOverlay,  /* slot[9] */
     (APTR)v3d_FreeRenderTarget, /* slot[10] */
+    (APTR)v3d_AllocDepthBuffer, /* slot[11] */
     (APTR)-1                    /* sentinel */
 };
 const struct TagItem _chip_v3d_Tags[] __attribute__((used)) =
 {
-    { MIT_Name,        (Tag)V3D_IFACE_NAME    },
-    { MIT_VectorTable, (Tag)_chip_v3d_Vectors },
-    { MIT_Version,     V3D_IFACE_VERSION      },
-    { TAG_DONE,        0                      }
+    { MIT_Name,        (Tag)V3D_IFACE_NAME       },
+    { MIT_VectorTable, (Tag)_chip_v3d_Vectors    },
+    { MIT_Version,     V3D_IFACE_VERSION         },
+    { MIT_DataSize,    sizeof(struct V3DIFace)   },
+    { TAG_DONE,        0                         }
 };

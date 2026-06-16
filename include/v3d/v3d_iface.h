@@ -89,6 +89,12 @@ struct V3DIFace {
     /* Free an RT resource (and its surface) previously allocated. */
     void (*FreeRenderTarget)(struct V3DIFace *Self, APTR token,
                              uint32 res, uint32 surface);
+
+    /* Allocate a depth buffer (Z24X8) resource + surface for w x h.  The caller
+     * binds *surface_out as the framebuffer's zsurf.  Free with FreeRenderTarget. */
+    BOOL (*AllocDepthBuffer)(struct V3DIFace *Self, APTR token,
+                             uint32 w, uint32 h,
+                             uint32 *res_out, uint32 *surface_out);
 };
 
 #endif /* V3D_IFACE_H */

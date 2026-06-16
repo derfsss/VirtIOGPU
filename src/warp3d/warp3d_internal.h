@@ -36,9 +36,18 @@ struct W3DVirgl {
     struct V3DContextInfo info;     /* handles into the chip's virgl pipeline */
     uint32 fb_w, fb_h;              /* drawregion dims for window->NDC mapping */
 
-    /* M2: own render target -- warp3d draws here, chip composites onto scanout */
-    uint32 rt_res;                  /* render-target resource (0 = none) */
-    uint32 rt_surface;             /* surface handle for binding as framebuffer */
+    /* M2/M3: own DOUBLE-BUFFERED render targets -- warp3d draws into the back
+     * buffer; on each frame's clear the completed buffer is registered as the
+     * overlay and the buffers swap, so the chip only ever composites a complete
+     * frame (no mid-frame flicker). */
+    uint32 rt_res[2];               /* render-target resources */
+    uint32 rt_surface[2];           /* surface handles (framebuffer bind) */
+    uint32 draw_idx;                /* which buffer we currently draw into */
+    BOOL   drawn_since_clear;       /* geometry submitted since last frame clear */
+
+    /* Shared depth buffer + depth-test DSA (for correct occlusion). */
+    uint32 zres, zsurf;             /* depth resource + surface (0 = none) */
+    uint32 dsa_handle;              /* depth-test DSA object handle */
 
     /* Deferred clear: ClearDrawRegion records the colour; the next draw emits
      * clear+draw in ONE submit so the chip's composite never observes the RT

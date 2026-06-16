@@ -531,7 +531,7 @@ BOOL chip_Submit3D(struct ChipGPUState *gs, uint32 ctx_id,
  * overflow to match chip_ResourceAttachBacking's behaviour.
  * ----------------------------------------------------------------------- */
 BOOL chip_ResourceCreateBlob(struct ChipGPUState *gs, uint32 resource_id,
-                              uint32 blob_mem, uint32 blob_flags, uint32 ctx_id,
+                              uint32 blob_mem, uint32 blob_flags,
                               uint64 blob_id, uint64 size,
                               struct DMAEntry *dma_list, uint32 dma_count)
 {
@@ -564,7 +564,6 @@ BOOL chip_ResourceCreateBlob(struct ChipGPUState *gs, uint32 resource_id,
     chip_zero(gs->resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
 
     cmd->hdr.type    = GP32(VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB);
-    cmd->hdr.ctx_id  = GP32(ctx_id);   /* required for HOST3D blobs */
     cmd->resource_id = GP32(resource_id);
     cmd->blob_mem    = GP32(blob_mem);
     cmd->blob_flags  = GP32(blob_flags);
@@ -587,133 +586,7 @@ BOOL chip_ResourceCreateBlob(struct ChipGPUState *gs, uint32 resource_id,
               resource_id, blob_mem, dma_count, rt);
         return FALSE;
     }
-    /* NOTE: DebugPrintF does not handle %llu -- print size as %lu (our blob
-     * sizes are < 4 GB) to avoid corrupting the trailing args. */
-    DCHIP("RESOURCE_CREATE_BLOB id=%lu mem=%lu flags=%lu size=%lu nr_entries=%lu OK",
-          resource_id, blob_mem, blob_flags, (uint32)size, dma_count);
-    return TRUE;
-}
-
-/* -----------------------------------------------------------------------
- * RESOURCE_MAP_BLOB -- map a HOST3D mappable blob into the host-visible
- * window at byte `offset`.  Response is VIRTIO_GPU_RESP_OK_MAP_INFO carrying
- * the cache type (VIRTIO_GPU_MAP_CACHE_*) in *map_info_out.
- * ----------------------------------------------------------------------- */
-BOOL chip_ResourceMapBlob(struct ChipGPUState *gs, uint32 resource_id,
-                           uint64 offset, uint32 *map_info_out)
-{
-    struct ExecIFace *IExec = gs->IExec;
-    IExec->MutexObtain(gs->io_lock);
-
-    struct virtio_gpu_resource_map_blob *cmd =
-        (struct virtio_gpu_resource_map_blob *)gs->cmd_buf;
-    struct virtio_gpu_resp_map_info *resp =
-        (struct virtio_gpu_resp_map_info *)gs->resp_buf;
-    chip_zero(gs->cmd_buf,  sizeof(*cmd));
-    chip_zero(gs->resp_buf, sizeof(*resp));
-
-    cmd->hdr.type    = GP32(VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB);
-    cmd->resource_id = GP32(resource_id);
-    cmd->offset      = GP64(offset);
-
-    uint32 rt = chip_gpu_send(gs, sizeof(*cmd), sizeof(*resp));
-    uint32 mi = GP32(resp->map_info);
-    IExec->MutexRelease(gs->io_lock);
-
-    if (rt != VIRTIO_GPU_RESP_OK_MAP_INFO) {
-        DCHIP("RESOURCE_MAP_BLOB res=%lu off=0x%lx failed, resp=0x%lx",
-              resource_id, (uint32)offset, rt);
-        return FALSE;
-    }
-    if (map_info_out) *map_info_out = mi;
-    DCHIP("RESOURCE_MAP_BLOB res=%lu off=0x%lx OK map_info=%lu (cache=%lu)",
-          resource_id, (uint32)offset, mi, mi & VIRTIO_GPU_MAP_CACHE_MASK);
-    return TRUE;
-}
-
-/* -----------------------------------------------------------------------
- * RESOURCE_UNMAP_BLOB -- remove a blob from the host-visible window.
- * ----------------------------------------------------------------------- */
-BOOL chip_ResourceUnmapBlob(struct ChipGPUState *gs, uint32 resource_id)
-{
-    struct ExecIFace *IExec = gs->IExec;
-    IExec->MutexObtain(gs->io_lock);
-
-    struct virtio_gpu_resource_unmap_blob {
-        struct virtio_gpu_ctrl_hdr hdr;
-        uint32 resource_id;
-        uint32 padding;
-    } *cmd = (void *)gs->cmd_buf;
-    chip_zero(gs->cmd_buf,  sizeof(*cmd));
-    chip_zero(gs->resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
-
-    cmd->hdr.type    = GP32(VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB);
-    cmd->resource_id = GP32(resource_id);
-
-    uint32 rt = chip_gpu_send(gs, sizeof(*cmd),
-                                 sizeof(struct virtio_gpu_ctrl_hdr));
-    IExec->MutexRelease(gs->io_lock);
-    return (rt == VIRTIO_GPU_RESP_OK_NODATA);
-}
-
-/* -----------------------------------------------------------------------
- * chip_alloc_coherent_blob -- allocate a HOST-COHERENT blob: host-allocated
- * (BLOB_MEM_HOST3D), mapped into the host-visible window (USE_MAPPABLE), so
- * the GPU (as resource *res_out) and the guest CPU (at *cpu_out) share the
- * SAME memory -- no transfers, no coherence hazard.  Recipe per Linux
- * virtgpu_vram.c (create_blob -> map_blob).  64K-aligned bump allocator over
- * the window.  Returns FALSE if unsupported or the create/map fails.
- * ----------------------------------------------------------------------- */
-BOOL chip_alloc_coherent_blob(struct ChipGPUState *gs, uint64 size,
-                               uint32 *res_out, APTR *cpu_out,
-                               uint32 *map_info_out)
-{
-    if (!gs->has_blob || !gs->has_host_visible)
-        return FALSE;
-
-    size = (size + 0xFFFFu) & ~(uint64)0xFFFFu;   /* 64K align */
-    if (gs->host_visible_alloc + size > gs->host_visible_size) {
-        DCHIP("coherent_blob: out of host-visible window (need 0x%lx, used 0x%lx/0x%lx)",
-              (uint32)size, (uint32)gs->host_visible_alloc,
-              (uint32)gs->host_visible_size);
-        return FALSE;
-    }
-
-    /* HOST3D blobs must be created within a 3D context.  Lazily create a
-     * dedicated context for host-coherent allocations (id stored in
-     * gs->blob_ctx_id; 0 = none yet). */
-    if (gs->blob_ctx_id == 0) {
-        uint32 cid = chip_alloc_resource_id(gs);   /* reuse the id space */
-        if (!chip_CTXCreate(gs, cid, "virtiogpu.blob", 0)) {
-            DCHIP("coherent_blob: CTX_CREATE failed");
-            return FALSE;
-        }
-        gs->blob_ctx_id = cid;
-    }
-
-    uint64 off = gs->host_visible_alloc;
-    uint32 res = chip_alloc_resource_id(gs);
-
-    if (!chip_ResourceCreateBlob(gs, res, VIRTIO_GPU_BLOB_MEM_HOST3D,
-                                  VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE,
-                                  gs->blob_ctx_id, 0 /* blob_id */, size, NULL, 0)) {
-        DCHIP("coherent_blob: CREATE_BLOB(HOST3D|MAPPABLE) failed");
-        return FALSE;
-    }
-
-    uint32 mi = 0;
-    if (!chip_ResourceMapBlob(gs, res, off, &mi)) {
-        chip_ResourceUnref(gs, res);
-        return FALSE;
-    }
-
-    gs->host_visible_alloc += size;
-    if (res_out)      *res_out = res;
-    if (cpu_out)      *cpu_out = (APTR)(gs->host_visible_base + (uint32)off);
-    if (map_info_out) *map_info_out = mi;
-
-    DCHIP("coherent_blob: res=%lu off=0x%lx cpu=0x%08lx size=0x%lx cache=%lu",
-          res, (uint32)off, gs->host_visible_base + (uint32)off,
-          (uint32)size, mi & VIRTIO_GPU_MAP_CACHE_MASK);
+    DCHIP("RESOURCE_CREATE_BLOB id=%lu mem=%lu flags=%lu size=%llu nr_entries=%lu OK",
+          resource_id, blob_mem, blob_flags, (unsigned long long)size, dma_count);
     return TRUE;
 }

@@ -103,13 +103,17 @@ crashing.
 ## Installation
 
 Copy `build/virtiogpu.chip` into `SYS:Kickstart/` on your AmigaOS
-volume, then add it to `SYS:Kickstart/Kicklayout` **before**
+volume, then add it to `SYS:Kickstart/Kicklayout` **after**
 `PCIGraphics.card`:
 
 ```
-MODULE Kickstart/virtiogpu.chip
 MODULE Kickstart/PCIGraphics.card
+MODULE Kickstart/virtiogpu.chip
 ```
+
+(Module order in Kicklayout does not affect driver init order — the
+chip's board resident runs by priority — but listing the card first
+is the canonical layout.)
 
 No configuration is required.  The driver queries QEMU for the active
 display via `GET_DISPLAY_INFO` and EDID, and registers screen modes
@@ -164,8 +168,7 @@ Outputs in `build/`:
 
 - `virtiogpu.chip` — the Picasso96 chip driver (primary artefact)
 - `minigl.library` — Phase 6 MiniGL stub (placeholder)
-- `setup_monitor`, `monitor_stub`, `test_composite`, `virtiogpu_info`
-  — helper / diagnostic tools
+- `test_composite`, `virtiogpu_info` — helper / diagnostic tools
 
 ---
 

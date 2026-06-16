@@ -454,8 +454,10 @@ BOOL chip_comp_draw_textured_quad(struct ChipGPUState *gs,
         return FALSE;
 
     uint32 ctx_id = gs->virgl_2d_ctx;
-    uint32 fb_w = gs->fb_width;
-    uint32 fb_h = gs->fb_height;
+    /* When an off-screen render target is bound (VRAM path) compute NDC from
+     * that target's dims, not the scanout's. */
+    uint32 fb_w = gs->comp_rt_active ? gs->comp_rt_w : gs->fb_width;
+    uint32 fb_h = gs->comp_rt_active ? gs->comp_rt_h : gs->fb_height;
 
     /* Convert pixel coords to NDC.  Viewport: [-1,+1] -> [0,fb_w/h]. */
     float x0 = 2.0f * (float)dst_x / (float)fb_w - 1.0f;
@@ -527,8 +529,11 @@ BOOL chip_comp_draw_textured_quad(struct ChipGPUState *gs,
     BOOL ok = virgl_submit(gs, ctx_id, &cbuf);
 
     if (ok) {
-        /* Flush the drawn region to the display */
-        chip_ResourceFlush(gs, gs->resource_id, dst_x, dst_y, dst_w, dst_h);
+        /* Flush the drawn region to the display -- but only when drawing into
+         * the scanout.  For an off-screen VRAM target the caller transfers the
+         * result back to board_mem itself (no scanout flush). */
+        if (!gs->comp_rt_active)
+            chip_ResourceFlush(gs, gs->resource_id, dst_x, dst_y, dst_w, dst_h);
     } else {
         DCHIP("comp_draw: SUBMIT FAILED");
     }
@@ -810,6 +815,20 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
      * once per session per reason so a virgl-off run doesn't drown the
      * log with one line per composite call. */
     struct ChipGPUState *gs = g_chip_state;
+
+    /* Periodic HW/SW composite census so we can see whether AOS4 ever hands
+     * us a board_mem-dest composite the GPU path can take (vs offscreen
+     * dests that always SW-fall-back).  Logged every 256 composites. */
+    {
+        static uint32 comp_last_log = 0;
+        if (g_comp_total - comp_last_log >= 256) {
+            comp_last_log = g_comp_total;
+            DCHIP("composite census: total=%lu hw=%lu sw=%lu",
+                  (ULONG)g_comp_total, (ULONG)g_comp_hw_count,
+                  (ULONG)g_comp_sw_count);
+        }
+    }
+
     if (!gs || !gs->virgl_2d_ready || !Destination) {
         static volatile UBYTE warn_no_gs        = 0;
         static volatile UBYTE warn_no_virgl     = 0;
@@ -966,17 +985,57 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
         }
     }
 
+    /* HYBRID (v53.174): the GPU path only renders PLAIN OPAQUE composites
+     * correctly so far -- COMPFLAG_IgnoreDestAlpha set (opaque destination)
+     * with NO source/dest alpha override.  Everything else renders wrong:
+     *   - COMPFLAG_SrcAlphaOverride (0x01) + COMPTAG_SrcAlpha: a constant
+     *     source alpha (window/AmiDock ghosting, drop-shadows ~50%).  We don't
+     *     apply it, so shadows render at full strength (solid BLACK) and
+     *     ghosted windows vanish.
+     *   - COMPFLAG_IgnoreDestAlpha clear: genuine dst-alpha transparency.
+     *   - COMPFLAG_DestAlphaOverride.
+     * Route all of those to software (graphics.library composites them
+     * correctly into board_mem); keep the GPU only for the opaque majority.
+     * (COMPFLAG_SrcFilter=0x04 bilinear is fine to keep on the GPU.) */
+    {
+        BOOL opaque_simple = (flags & COMPFLAG_IgnoreDestAlpha) &&
+            !(flags & (COMPFLAG_SrcAlphaOverride | COMPFLAG_DestAlphaOverride));
+        if (!opaque_simple) {
+            g_comp_sw_count++;
+            g_comp_total++;
+            goto sw_fallback;
+        }
+    }
+
     /* Attempt hardware compositing under io_lock to prevent interleaving
      * with flush_all's strip transfers and buffer swaps. */
     {
         struct ExecIFace *IExec = gs->IExec;
+        /* The scanout resource IS the visible screen bitmap.  A composite
+         * whose destination is that bitmap can render straight into the
+         * scanout (legacy path); any other board_mem bitmap is an off-screen
+         * window/friend bitmap that must be composited into ITS OWN GPU
+         * resource and the result transferred back to board_mem (VRAM
+         * emulation, v53.166). */
+        BOOL is_screen = (dst_planes0 == gs->panning_mem);
+        uint32 result;
+
         IExec->MutexObtain(gs->io_lock);
 
-        uint32 result = chip_virgl_composite(gs, Operator, Source,
-                                               src_data, src_bpr, src_format,
-                                               src_x, src_y, src_w, src_h,
-                                               dst_x, dst_y, dst_w, dst_h,
-                                               flags, color0);
+        if (is_screen) {
+            result = chip_virgl_composite(gs, Operator, Source,
+                                           src_data, src_bpr, src_format,
+                                           src_x, src_y, src_w, src_h,
+                                           dst_x, dst_y, dst_w, dst_h,
+                                           flags, color0);
+        } else {
+            result = chip_vram_composite(gs, Operator, Source,
+                                          src_data, src_bpr, src_format,
+                                          src_x, src_y, src_w, src_h,
+                                          Destination,
+                                          dst_x, dst_y, dst_w, dst_h,
+                                          flags, color0);
+        }
 
         IExec->MutexRelease(gs->io_lock);
 
@@ -987,10 +1046,12 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
             goto sw_fallback;
         }
 
-        /* Hardware path succeeded -- GPU resource is updated.
-         * Also run SW composite to update board_mem (RAM shadow), otherwise
-         * the periodic flush task will overwrite GPU result with stale RAM. */
-        {
+        /* Screen destination: the GPU wrote the scanout, but board_mem (the
+         * RAM shadow the flush task transfers) is still stale -- run the SW
+         * composite to keep it consistent.  Off-screen (VRAM) destinations
+         * already had the result transferred back to board_mem, so no SW
+         * re-composite is needed. */
+        if (is_screen) {
             OrigFunc orig2 = (OrigFunc)g_orig_CompositeTagList;
             orig2(Self, Operator, Source, Destination, tags);
         }

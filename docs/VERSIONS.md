@@ -1967,9 +1967,68 @@ benches cleanly.  Prefer fresh temp dirs after hard kills.
 
 ---
 
+## v53.162 - v53.188 -- 14-16.06.2026
+
+**Phase 7 performance investigation (ENV-gated, all default OFF)**
+
+A roadmap of perf levers was implemented behind ENV toggles
+(`virtiogpu_zerocopy`, `virtiogpu_dirtyrect`, `virtiogpu_gpuaccel`,
+`virtiogpu_virgl2d`) in the new `src/chip/chip_perf.c`, A/B benchmarked
+with gfxbench2d, then mostly parked because the wins are platform-blocked
+or net-neutral under QEMU TCG:
+
+- **board_mem write-through** (`CHIP_BOARDMEM_WT`, kept ON): blits +12-26%,
+  FillRect unmoved (QEMU barely models PPC cache attrs; FillRect 512^2 is
+  emulated-memory-bandwidth-bound either way).  Real-HW-correct, no regression.
+- **Zero-copy 32bpp scanout** (item 1): colours correct on gl=on but a net
+  loss vs the virgl 3D-resource present -- kept OFF.
+- **Dirty-rect** (item 2): needs `BIF_GRANTDIRECTACCESS` off, which freezes
+  WB bring-up (compositor screen-blit doesn't route through the chip vtable)
+  -- ruled out.
+- **HW compositing** (item 3): full virgl pipeline + CompositeTagList hook is
+  stable, but AOS4 WB never issues a board-dest composite (census hw=0/sw=N)
+  and the mandatory full-frame flush overwrites GPU work -- structurally
+  blocked.  Host-coherent blob (the one route that would fix it) needs Venus,
+  which needs libdrm and is Windows-host-blocked.
+- **Blob GUEST scanout**: QEMU run with `blob=true,hostmem=256M`.
+- Debug-spam cleanup; `CHIP_PROF_ENABLE`/`DCHIP_V` gates.
+
+Net shipping regime: WT board_mem + virgl 3D scanout + blob GUEST +
+GRANTDIRECTACCESS + SW compositing.  Full detail in the project memory notes.
+
+---
+
+## v53.189 -- 16.06.2026
+
+**Phase 6: first Warp3D triangle via virgl DRAW_VBO**
+
+The chip renders a real RGB-corner 3D triangle through the full virgl 3D
+pipeline -- a vertex buffer of `pos[4]+colour[4]` verts (stride 32) bound to
+the passthrough VS + per-vertex-colour FS, submitted as `DRAW_VBO`, presented
+on the host GL.  Visually confirmed on gl=on (red top / green bottom-left /
+blue bottom-right over the WB desktop).  This is the exact draw pattern a
+Warp3D->virgl translation will reuse, so it de-risks the host-GL 3D path
+end-to-end on the target before building `Warp3D.library`.
+
+- `chip_virgl_draw_test_triangle()` in `chip_virgl_2d.c`.
+- ENV-gated, inert by default: `ENVARC:virtiogpu_tritest` (requires
+  `virtiogpu_virgl2d=1`).  The flush task draws it OVER the live scanout each
+  frame (`gs->virgl_test_quad == 3`); the desktop still presents normally.
+
+### Build lesson
+
+A NON-static fully-constant `float verts[24] = {...}` makes GCC synthesise a
+`memcpy` from `.rodata`, which pulls newlib's `memcpy` stub
+(`libc.a(stub___NewlibCall.o)` -> `__NewlibCall` -> undefined `INewlib`) and
+fails the `-nostartfiles` chip link.  Fix: `static const`.  Likewise never use
+`%f`/`%.Nf` in `DCHIP`/`DebugPrintF` -- float varargs pull newlib float printf
+(same failure); print milli-units as `%ld`.  Diagnose with
+`ppc-amigaos-nm <obj>.o | grep ' U memcpy\| U __NewlibCall'`.
+
+---
+
 ## Planned releases
 
 | Version | Phase | Objective |
 |---------|-------|-----------|
-| v54.x | Phase 5b | Hardware compositing (CompositeTags) |
-| v55.x | Phase 6 | MiniGL / Warp3D via Virgl 3D |
+| v54.x | Phase 6 | Warp3D.library on virgl (Wazp3D-derived) + MiniGL |

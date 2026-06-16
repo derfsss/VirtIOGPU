@@ -469,6 +469,22 @@ struct ChipGPUState {
 
     /* Blob resource support (VIRTIO_GPU_F_RESOURCE_BLOB) */
     BOOL    has_blob;           /* TRUE if RESOURCE_BLOB negotiated */
+
+    /* Host-visible shared-memory region (VIRTIO_PCI_CAP_SHARED_MEMORY_CFG,
+     * QEMU `-device virtio-gpu-gl-pci,blob=true,hostmem=N`).  A host-allocated
+     * blob (BLOB_MEM_HOST3D + USE_MAPPABLE) is placed into this window via
+     * RESOURCE_MAP_BLOB at a guest-chosen offset; the guest then accesses that
+     * memory directly through the BAR -- SHARED with the host GPU (no transfer,
+     * no coherence hazard).  This is the foundation for blob host-coherent
+     * VRAM emulation. */
+    BOOL    has_host_visible;       /* shared-memory cap found + BAR mapped */
+    uint8   host_visible_bar;       /* BAR index of the region */
+    uint8   host_visible_shmid;     /* shmid (expect HOST_VISIBLE=1) */
+    uint32  host_visible_base;      /* CPU virtual base of the window */
+    uint64  host_visible_size;      /* window size in bytes */
+    uint64  host_visible_offset;    /* region offset within the BAR */
+    uint64  host_visible_alloc;     /* bump allocator: next free offset */
+    uint32  blob_ctx_id;            /* 3D context for HOST3D blob alloc (0=none) */
     /* When TRUE, fb_resource_id is a BLOB_MEM_GUEST resource: the host
      * imports our DMA pages directly and reads them on RESOURCE_FLUSH,
      * so chip_flush / chip_flush_all can skip TRANSFER_TO_HOST_2D
@@ -513,6 +529,67 @@ struct ChipGPUState {
     /* Compositing blend state handles -- one per Porter-Duff operator.
      * Index = enum enPDOperator value (0..14).  0 = unsupported. */
     uint32  comp_blends[15];
+
+    /* ----------------------------------------------------------------
+     * Phase 7 performance experiments (v53.162).  All OFF by default;
+     * enabled per-boot via ENV: vars read in chip_apply_perf_env (called
+     * from the deferred first-SetSwitch check, like the null-vtable
+     * experiment).  See docs/PHASE7_PERF_PLAN.md.
+     * ---------------------------------------------------------------- */
+
+    /* Item 1 -- zero-copy 32bpp scanout (gl=off / pixman path only).
+     * Back the scanout resource directly with the screen bitmap pages
+     * (format X8R8G8B8 == AOS A8R8G8B8 byte order on PPC BE) so the
+     * board_mem->fb_mem byte-reverse is skipped.  Re-attached when the
+     * panning surface or active dims change. */
+    BOOL    zc_enabled;         /* ENV:virtiogpu_zerocopy */
+    BOOL    zc_active;          /* TRUE while presenting via zc_resource */
+    uint32  zc_resource;        /* direct 2D resource id (0 = none) */
+    uint32  zc_w, zc_h;         /* dims of zc_resource */
+    APTR    zc_mem;             /* panning_mem currently backing zc_resource */
+    uint32  zc_size;            /* bytes StartDMA'd for zc_mem */
+    struct DMAEntry *zc_dma_list;
+    uint32  zc_dma_count;
+
+    /* Item 2 -- exact dirty-rectangle tracking.  Union bbox is half-open
+     * [x0,x1) x [y0,y1).  Guarded by dirty_lock.  Requires
+     * BIF_GRANTDIRECTACCESS cleared so every screen write hits the vtable. */
+    BOOL    dirty_enabled;      /* ENV:virtiogpu_dirtyrect */
+    APTR    dirty_lock;         /* ASOT_MUTEX, non-recursive */
+    BOOL    dirty_valid;        /* TRUE if a region is pending */
+    WORD    dirty_x0, dirty_y0, dirty_x1, dirty_y1;
+
+    /* Item 3 -- GPU-accelerated large fills (virgl / gl=on path).  Large
+     * non-CLUT FillRects are drawn GPU-side; board_mem stays authoritative
+     * (CPU fill still runs) but the rect is not marked dirty so the flush
+     * task skips re-transferring it. */
+    BOOL    gpuaccel_enabled;   /* ENV:virtiogpu_gpuaccel */
+    uint32  gpuaccel_min_area;  /* rects with fewer pixels stay on the CPU */
+
+    /* Virgl 2D / HW-composite path (the linchpin for item 3 + HW
+     * compositing).  Re-enables chip_virgl_init_2d + the CompositeTags
+     * hook, gated by ENV:virtiogpu_virgl2d (default off).  When a mode
+     * change resizes the active area, SetGC sets virgl_needs_resize and
+     * signals the flush task, which calls chip_virgl_recover_2d on its
+     * own thread (avoids racing the present path -- same pattern as the
+     * virgl_ctx_error recovery). */
+    BOOL          virgl2d_enabled;    /* ENV:virtiogpu_virgl2d */
+    volatile BOOL virgl_needs_resize; /* SetGC -> flush task recover request */
+
+    /* ----------------------------------------------------------------
+     * VRAM emulation (v53.166).  In the BIF_BLITTER regime graphics.library
+     * allocates off-screen window bitmaps in board_mem (via AllocCardMem),
+     * then composites window content INTO those bitmaps.  To HW-composite
+     * correctly each off-screen dst bitmap is mirrored by its own GPU 3D
+     * render-target resource (chip_vram.c cache, keyed by Planes[0]); the
+     * composite renders into THAT resource (not the scanout) and the result
+     * is transferred back to board_mem.  comp_rt_* redirect the shared draw
+     * helpers to the bound off-screen target. */
+    BOOL    comp_rt_active;     /* draw helpers target an off-screen RT */
+    uint32  comp_rt_w, comp_rt_h; /* dims of the bound off-screen RT (NDC) */
+    BOOL    vram_enabled;       /* VRAM composite path live (= virgl2d_enabled) */
+
+    BOOL    perf_env_checked;   /* one-shot: chip_apply_perf_env has run */
 };
 
 extern struct ChipGPUState *g_chip_state;
@@ -597,12 +674,25 @@ struct ChipProf {
         .logged_first     = 0,                                                \
     }
 
-/* chip_prof_begin -- snapshot the EClock low word.  Returns 0 if the
- * time-source isn't ready yet, in which case chip_prof_end skips the
- * accumulation (no time can be measured). */
+/* CHIP_PROF_ENABLE -- master switch for the PROF[] performance logging.
+ * Default 0: chip_prof_begin returns 0, so chip_prof_end no-ops -- zero
+ * hot-path overhead (no per-op EClock reads) and zero log spam.  Build with
+ * -DCHIP_PROF_ENABLE=1 to turn the rolling PROF[] summaries back on for
+ * perf-measurement work (e.g. gfxbench2d baselines). */
+#ifndef CHIP_PROF_ENABLE
+#define CHIP_PROF_ENABLE 0
+#endif
+
+/* chip_prof_begin -- snapshot the EClock low word.  Returns 0 if profiling is
+ * disabled or the time-source isn't ready yet, in which case chip_prof_end
+ * skips the accumulation (no time can be measured). */
 static inline uint32 chip_prof_begin(struct ChipGPUState *gs)
 {
+#if !CHIP_PROF_ENABLE
+    (void)gs; return 0;
+#else
     if (!gs || !gs->ITimer || !gs->eclock_freq) return 0;
+#endif
     struct EClockVal ev;
     gs->ITimer->ReadEClock(&ev);
     /* Reserve 0 as "no measurement" -- offset by 1 so a real reading of
@@ -875,9 +965,18 @@ void chip_QueryCapsets(struct ChipGPUState *gs);
 
 /* chip_gpu_3d.c (blob resources) */
 BOOL chip_ResourceCreateBlob(struct ChipGPUState *gs, uint32 resource_id,
-                              uint32 blob_mem, uint32 blob_flags,
+                              uint32 blob_mem, uint32 blob_flags, uint32 ctx_id,
                               uint64 blob_id, uint64 size,
                               struct DMAEntry *dma_list, uint32 dma_count);
+BOOL chip_ResourceMapBlob(struct ChipGPUState *gs, uint32 resource_id,
+                           uint64 offset, uint32 *map_info_out);
+BOOL chip_ResourceUnmapBlob(struct ChipGPUState *gs, uint32 resource_id);
+/* Host-coherent blob: GPU resource *res_out and CPU pointer *cpu_out share the
+ * same host memory via the host-visible window (no transfers).  See
+ * chip_gpu_3d.c. */
+BOOL chip_alloc_coherent_blob(struct ChipGPUState *gs, uint64 size,
+                               uint32 *res_out, APTR *cpu_out,
+                               uint32 *map_info_out);
 
 /* chip_virgl_2d.c */
 BOOL chip_virgl_init_2d(struct ChipGPUState *gs);
@@ -892,6 +991,8 @@ BOOL chip_virgl_blit_rect(struct ChipGPUState *gs,
 BOOL chip_virgl_draw_colored_quad(struct ChipGPUState *gs,
                                    uint32 x, uint32 y, uint32 w, uint32 h,
                                    float r, float g, float b, float a);
+/* Phase 6 "first triangle" -- RGB 3D triangle via virgl DRAW_VBO. */
+BOOL chip_virgl_draw_test_triangle(struct ChipGPUState *gs);
 
 /* chip_composite.c */
 BOOL chip_comp_init_blends(struct ChipGPUState *gs);
@@ -921,6 +1022,24 @@ uint32 chip_virgl_composite(struct ChipGPUState *gs,
 BOOL chip_comp_install_hook(struct ChipGPUState *gs);
 void chip_comp_set_dipf_flags(struct ChipGPUState *gs);
 
+/* chip_vram.c -- per-board-bitmap GPU render-target cache (VRAM emulation).
+ * chip_vram_composite renders src over the off-screen dst bitmap's own GPU
+ * resource and transfers the result back to board_mem.  Returns a COMPERR_*
+ * code (COMPERR_SoftwareFallback when the bitmap can't be handled on the GPU).
+ * chip_vram_invalidate drops the cache entry for a freed board_mem block;
+ * chip_vram_teardown releases all cached resources at shutdown. */
+uint32 chip_vram_composite(struct ChipGPUState *gs,
+                            uint32 op,
+                            struct BitMap *Source,
+                            const void *src_data, uint32 src_bpr,
+                            uint32 src_format,
+                            int32 src_x, int32 src_y, int32 src_w, int32 src_h,
+                            struct BitMap *Destination,
+                            int32 dst_x, int32 dst_y, int32 dst_w, int32 dst_h,
+                            uint32 flags, uint32 color0);
+void chip_vram_invalidate(struct ChipGPUState *gs, APTR addr);
+void chip_vram_teardown(struct ChipGPUState *gs);
+
 /* chip_flush.c */
 void chip_flush(WORD x, WORD y, UWORD w, UWORD h);
 void chip_flush_all(void);
@@ -928,6 +1047,19 @@ void chip_flush_task_entry(void);
 /* Wake the flush task immediately -- replaces direct chip_flush_all() calls
  * from vtable ops so they return quickly and let the flush task coalesce. */
 void chip_flush_signal_activity(struct ChipGPUState *gs);
+
+/* chip_perf.c -- Phase 7 performance experiments (zero-copy / dirty-rect).
+ * All gated by ENV: vars; default build behaviour is unchanged. */
+void chip_apply_perf_env(struct ChipGPUState *gs, struct BoardInfo *bi);
+void chip_mark_dirty(struct ChipGPUState *gs, WORD x, WORD y, UWORD w, UWORD h);
+BOOL chip_dirty_take(struct ChipGPUState *gs,
+                     WORD *x, WORD *y, UWORD *w, UWORD *h);
+void chip_zc_update(struct ChipGPUState *gs);
+void chip_zc_teardown(struct ChipGPUState *gs);
+/* Present the given rect via the zero-copy direct resource.  Returns FALSE
+ * (caller falls back to the convert path) when zero-copy is not active. */
+BOOL chip_zc_present(struct ChipGPUState *gs,
+                     WORD x, WORD y, UWORD w, UWORD h);
 
 /* chip_modes.c */
 void chip_register_modes(struct ChipGPUState *gs);

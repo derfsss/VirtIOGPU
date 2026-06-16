@@ -407,6 +407,13 @@ void chip_flush(WORD x, WORD y, UWORD w, UWORD h)
     x = (WORD)x0;          y = (WORD)y0;
     w = (UWORD)(x1 - x0);  h = (UWORD)(y1 - y0);
 
+    /* Item 2: record the dirty region so the flush task can present only
+     * what changed.  No-op unless ENV:virtiogpu_dirtyrect.  Every vtable
+     * op that funnels through chip_flush (FillRect, BlitTemplate,
+     * BlitPattern, DrawLine, InvertRect, Planar2*) is covered here; the
+     * blit ops that signal the task directly mark their own rects. */
+    chip_mark_dirty(gs, x, y, w, h);
+
     /* Wake the flush task and return -- NO synchronous presentation.
      *
      * This used to convert + TRANSFER_TO_HOST + RESOURCE_FLUSH the rect
@@ -493,42 +500,67 @@ void chip_flush_all(void)
 
     if (!gs->double_buffer || !gs->fb_mem2) {
         /* --- Single-buffer path: batched single-transfer flush.
-         * Converts whole frame, then one TransferToHost covering entire area,
+         * Converts the present rect, then one TransferToHost covering it,
          * then one ResourceFlush.  io_lock must be held for the conversion
          * because chip_flush (direct drawing op) can race with this path in
          * single-buffer mode. */
+
+        /* Item 1: keep the zero-copy direct resource in sync with the
+         * current panning surface.  No-op unless ENV:virtiogpu_zerocopy. */
+        chip_zc_update(gs);
+
+        /* Item 2: present only the accumulated dirty union when tracking is
+         * enabled; the full active rect otherwise.  FALSE => idle frame
+         * (dirty tracking on, nothing drawn) -- present nothing. */
+        WORD  rx, ry;
+        UWORD rw, rh;
+        if (!chip_dirty_take(gs, &rx, &ry, &rw, &rh)) {
+            HOT_STAGE(gs, "flush_all:sb:idle");
+            chip_prof_end(gs, &prof_flush_all, prof_t0, 0);
+            return;
+        }
+
+        /* Item 1: zero-copy present -- transfer + flush the rect straight
+         * from the screen bitmap, no board_mem->fb_mem conversion. */
+        if (chip_zc_present(gs, rx, ry, rw, rh)) {
+            HOT_STAGE(gs, "flush_all:sb:zc_done");
+            chip_prof_end(gs, &prof_flush_all, prof_t0, (uint32)rw * rh * 4);
+            return;
+        }
+
         HOT_STAGE(gs, "flush_all:sb:obtain_lock");
         IExec->MutexObtain(gs->io_lock);
         HOT_STAGE(gs, "flush_all:sb:convert");
 
-        chip_convert_rect(gs, gs->fb_mem, 0, 0, w, h);
+        chip_convert_rect(gs, gs->fb_mem, rx, ry, rw, rh);
 
+        uint64 t_off = (uint64)((uint32)ry * gs->fb_stride + (uint32)rx * 4);
         BOOL t_ok;
         if (gs->virgl_2d_ready && !gs->virgl_ctx_error) {
             struct virtio_gpu_box box;
             chip_zero(&box, sizeof(box));
-            box.w = w; box.h = h; box.d = 1;
+            box.x = rx; box.y = ry; box.w = rw; box.h = rh; box.d = 1;
             t_ok = chip_TransferToHost3D(gs, gs->virgl_2d_ctx, gs->resource_id,
-                0, gs->fb_stride, 0, 0, &box);
+                0, gs->fb_stride, 0, t_off, &box);
             if (!t_ok) {
                 gs->virgl_ctx_error = TRUE;
-                t_ok = chip_TransferToHost2D(gs, gs->fb_resource_id, 0, 0, w, h, 0ULL);
+                t_ok = chip_TransferToHost2D(gs, gs->fb_resource_id, rx, ry, rw, rh, t_off);
             }
         } else {
-            t_ok = chip_TransferToHost2D(gs, gs->fb_resource_id, 0, 0, w, h, 0ULL);
+            t_ok = chip_TransferToHost2D(gs, gs->fb_resource_id, rx, ry, rw, rh, t_off);
         }
 
         if (t_ok) {
             HOT_STAGE(gs, "flush_all:sb:res_flush");
             uint32 flush_res = (gs->virgl_ctx_error || !gs->virgl_2d_ready)
                                 ? gs->fb_resource_id : gs->resource_id;
-            chip_ResourceFlush(gs, flush_res, 0, 0, w, h);
+            chip_ResourceFlush(gs, flush_res, rx, ry, rw, rh);
         }
 
         HOT_STAGE(gs, "flush_all:sb:release_lock");
         IExec->MutexRelease(gs->io_lock);
         HOT_STAGE(gs, "flush_all:sb:done");
-        chip_prof_end(gs, &prof_flush_all, prof_t0, w * h * 4);
+        chip_prof_end(gs, &prof_flush_all, prof_t0, (uint32)rw * rh * 4);
         return;
     }
 
@@ -889,6 +921,18 @@ void chip_flush_task_entry(void)
             IExec->Cause(&gs->bi->SoftInterrupt);
         }
 
+        /* Mode-change resize (virgl path): SetGC flagged that the active
+         * dimensions changed.  Recreate the 3D scanout at the new size on
+         * THIS thread (the present thread) so we never tear down a resource
+         * the present path is mid-using.  chip_virgl_recover_2d reads the
+         * updated active_width/height. */
+        if (gs->virgl_needs_resize) {
+            gs->virgl_needs_resize = FALSE;
+            DCHIP("flush_task: virgl resize -> recover_2d (%lux%lu)",
+                  (ULONG)gs->active_width, (ULONG)gs->active_height);
+            chip_virgl_recover_2d(gs);
+        }
+
         /* Recover from poisoned Virgl context before flushing. */
         if (gs->virgl_ctx_error) {
             chip_virgl_recover_2d(gs);
@@ -909,6 +953,9 @@ void chip_flush_task_entry(void)
                 1.0f, 0.0f, 0.0f, 0.8f);
         } else if (gs->virgl_test_quad == 2) {
             chip_comp_test_textured_quad(gs);
+        } else if (gs->virgl_test_quad == 3) {
+            /* Phase 6 milestone: RGB 3D triangle via virgl DRAW_VBO. */
+            chip_virgl_draw_test_triangle(gs);
         }
 
         cycle++;

@@ -5,10 +5,12 @@ that:
 
   1. copies virtiogpu.chip into SYS:Kickstart/
   2. inserts `MODULE Kickstart/virtiogpu.chip` into
-     SYS:Kickstart/Kicklayout, immediately BEFORE the PCIGraphics.card
-     line (the chip's VirtIOGPUBoard resident must hook
-     PCIGraphics.card before graphics.library initialises) -- with a
-     Kicklayout.bak backup, LF-only line endings, and idempotency
+     SYS:Kickstart/Kicklayout, immediately AFTER the PCIGraphics.card
+     line (resident init order is governed by priority --
+     VirtIOGPUBoard at 65 runs before graphics.library at 63
+     regardless of module order -- and the canonical layout lists
+     PCIGraphics.card first) -- with a Kicklayout.bak backup, LF-only
+     line endings, and idempotency
   3. offers a reboot on the finish page
 
 install.py + VirtIOGPUInstallerLocale.py are emitted from this fixture
@@ -36,8 +38,10 @@ under QEMU amigaone; with the correct CWD the wizard renders fully).
 
 Full manual click-through VERIFIED 2026-06-10 on QEMU amigaone
 (Installation Utility, drawer served over 9p SHARED:): chip copied to
-SYS:Kickstart/ (250968 bytes), MODULE line inserted immediately before
-PCIGraphics.card, Kicklayout.bak created.  The default-on Reboot
+SYS:Kickstart/ (250968 bytes), MODULE line inserted, Kicklayout.bak
+created.  (That run inserted BEFORE PCIGraphics.card; the insertion
+point changed to AFTER on 2026-06-13 -- same code path, anchor
+unchanged.)  The default-on Reboot
 post-install action runs `reboot SYNC`; on QEMU amigaone a guest
 reboot EXITS QEMU (clean exit 0) rather than resetting -- the finish
 text warns about this.
@@ -48,7 +52,7 @@ from installergen import (
     LocaleString, LocaleRef, Handler,
 )
 from installergen.presets import (
-    README_BUTTON_LOCALE, InsertBeforeFirst, welcome_with_readme,
+    README_BUTTON_LOCALE, InsertAfterFirst, welcome_with_readme,
     finish_page, system_edit_helper, system_edit_exit_handler,
 )
 
@@ -97,14 +101,17 @@ locale = [
 # Welcome page with the View Readme button (proven preset).
 welcome_page = welcome_with_readme(LocaleRef("MSG_WELCOME"), "README.md")
 
-# Kicklayout edit: the chip MUST load before PCIGraphics.card, so the
-# MODULE line is inserted directly before it (proven preset:
-# idempotent, .bak backup, LF-only; errors if the anchor is missing).
+# Kicklayout edit: the MODULE line goes directly after the
+# PCIGraphics.card line (canonical layout lists the card first;
+# resident init order is by priority, so VirtIOGPUBoard at 65 still
+# runs before graphics.library at 63 regardless of module order).
+# Proven preset: idempotent, .bak backup, LF-only; errors if the
+# anchor is missing.
 update_kicklayout = system_edit_helper(
     "SYS:Kickstart/Kicklayout",
     "MODULE Kickstart/virtiogpu.chip",
-    InsertBeforeFirst(contains="PCIGraphics.card",
-                      describe="MODULE Kickstart/PCIGraphics.card"),
+    InsertAfterFirst(contains="PCIGraphics.card",
+                     describe="MODULE Kickstart/PCIGraphics.card"),
 )
 
 # The edit runs when the INSTALL page is left in the forward direction
@@ -116,7 +123,7 @@ install_page = Page(
         "SYS:Kickstart/Kicklayout",
         "MODULE Kickstart/virtiogpu.chip",
         "VirtIOGPU installer",
-        "manually, BEFORE the PCIGraphics.card line:",
+        "manually, AFTER the PCIGraphics.card line:",
     ),
 )
 

@@ -225,6 +225,15 @@ static BOOL chip_SetSwitch(struct BoardInfo *bi, BOOL enabled)
         gs->null_vtable_checked = TRUE;
     }
 
+    /* One-shot Phase 7 performance-experiment toggles (ENV:virtiogpu_*).
+     * Same deferral rationale as the null-vtable check above; dos is
+     * already open by this point.  Default (no vars) leaves behaviour
+     * identical to the pre-Phase-7 driver. */
+    if (enabled && gs && !gs->perf_env_checked) {
+        chip_apply_perf_env(gs, bi);
+        gs->perf_env_checked = TRUE;
+    }
+
     if (enabled) chip_flush_signal_activity(gs);
     return TRUE;
 }
@@ -426,8 +435,22 @@ static void chip_SetGC(struct BoardInfo *bi, struct ModeInfo *mi, BOOL border)
             /* Recreate the framebuffer resource at the new active size.
              * QEMU's gl=on path sizes the SDL window to the resource
              * dimensions, so resource MUST match active for the host
-             * window and the AmigaOS rendering to align. */
-            if (!chip_resize_fb_to_mode(gs, gs->active_width, gs->active_height)) {
+             * window and the AmigaOS rendering to align.
+             *
+             * Two cases:
+             *  - Virgl 2D active: the scanout IS the 3D resource (sized to
+             *    active, backed by max-sized fb_mem).  Recreating it here
+             *    (cross-task) would race the flush task's present, so just
+             *    flag it and let the flush task call chip_virgl_recover_2d
+             *    on its own thread (same pattern as virgl_ctx_error).  Do
+             *    NOT call chip_resize_fb_to_mode -- that reallocs fb_mem and
+             *    switches the scanout to the 2D resource, stranding virgl.
+             *  - No virgl: classic 2D-resource resize, in-line as before. */
+            if (gs->virgl_2d_ready) {
+                gs->virgl_needs_resize = TRUE;
+                DCHIP("SetGC: virgl active -- deferring 3D resize to flush task (%lux%lu)",
+                      (ULONG)gs->active_width, (ULONG)gs->active_height);
+            } else if (!chip_resize_fb_to_mode(gs, gs->active_width, gs->active_height)) {
                 DCHIP("SetGC: chip_resize_fb_to_mode FAILED -- screen may be stale");
             }
             DCHIP("SetGC: post-resize bi->Mouse=%d,%d gs->cursor=%d,%d active=%lux%lu",
@@ -442,6 +465,13 @@ static void chip_SetGC(struct BoardInfo *bi, struct ModeInfo *mi, BOOL border)
              * this flag by sending one MOVE_CURSOR. */
             gs->cursor_needs_refresh = TRUE;
         }
+
+        /* Item 2: a mode change repaints everything -- mark the full new
+         * active area dirty so the dirty-rect present covers the whole
+         * frame (no-op unless dirty tracking is enabled). */
+        chip_mark_dirty(g_chip_state, 0, 0,
+                        (UWORD)g_chip_state->active_width,
+                        (UWORD)g_chip_state->active_height);
     }
     chip_flush_signal_activity(g_chip_state);
 }
@@ -508,6 +538,16 @@ static void chip_SetPanning(struct BoardInfo *bi, APTR mem, UWORD width,
     } else if (!mem) {
         DCHIP("SetPanning: mem=NULL -- panning state NOT updated");
     }
+
+    /* Item 2: a panning change swaps the whole displayed surface, so mark
+     * the full active area dirty -- the new surface must be presented in
+     * full (no-op unless dirty tracking is enabled).  chip_zc_update
+     * (called from the flush task) re-attaches the zero-copy resource to
+     * the new surface on the next tick. */
+    if (g_chip_state)
+        chip_mark_dirty(g_chip_state, 0, 0,
+                        (UWORD)g_chip_state->active_width,
+                        (UWORD)g_chip_state->active_height);
     chip_flush_signal_activity(g_chip_state);
 }
 

@@ -338,7 +338,10 @@ void chip_dump_displayinfobase(struct ChipGPUState *gs)
             UWORD w = dim.Nominal.MaxX - dim.Nominal.MinX + 1;
             UWORD h = dim.Nominal.MaxY - dim.Nominal.MinY + 1;
             const char *origin = (disp.PropertyFlags & DIPF_IS_RTG) ? "RTG" : "native";
-            DCHIP("  ModeID=0x%08lx mon=0x%04lx %4ux%4u d=%u flags=0x%08lx "
+            /* Per-mode detail is verbose (~80 lines) -- gate to DCHIP_V so the
+             * default log stays quiet; the scanned/logged summary below remains.
+             * Enable verbose to bring it back when debugging the mode list. */
+            DCHIP_V("  ModeID=0x%08lx mon=0x%04lx %4ux%4u d=%u flags=0x%08lx "
                   "navail=0x%04x %s name=%s",
                   mid, (mid >> 16) & 0xFFFF,
                   (unsigned)w, (unsigned)h,
@@ -347,10 +350,8 @@ void chip_dump_displayinfobase(struct ChipGPUState *gs)
                   (unsigned)disp.NotAvailable,
                   origin,
                   got_name ? ni.Name : "(?)");
-            if (++logged >= 80) {
-                DCHIP("  ... (truncated at 80)");
+            if (++logged >= 80)
                 break;
-            }
         }
     }
     DCHIP("DisplayInfoBase: scanned=%d logged=%d", scanned, logged);

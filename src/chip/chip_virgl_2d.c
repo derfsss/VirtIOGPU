@@ -775,8 +775,9 @@ BOOL chip_virgl_draw_colored_quad(struct ChipGPUState *gs,
         return FALSE;
 
     uint32 ctx_id = gs->virgl_2d_ctx;
-    uint32 fb_w = gs->fb_width;
-    uint32 fb_h = gs->fb_height;
+    /* Off-screen VRAM target redirects NDC to the bound target's dims. */
+    uint32 fb_w = gs->comp_rt_active ? gs->comp_rt_w : gs->fb_width;
+    uint32 fb_h = gs->comp_rt_active ? gs->comp_rt_h : gs->fb_height;
 
     /* Convert pixel coords to NDC.  Viewport maps [-1,+1] -> [0,fb_w/h]. */
     float x0_ndc = 2.0f * (float)x / (float)fb_w - 1.0f;
@@ -829,14 +830,18 @@ BOOL chip_virgl_draw_colored_quad(struct ChipGPUState *gs,
         dump_count++;
         DCHIP("draw_colored_quad: DRAW_VBO submit %lu dwords, vbuf_res=%lu",
               (unsigned long)cbuf.dwords, (unsigned long)gs->virgl_2d_vbuf_res);
-        DCHIP("  NDC: x0=%.4f y0=%.4f x1=%.4f y1=%.4f",
-              x0_ndc, y0_ndc, x1_ndc, y1_ndc);
+        /* NDC in milli-units (avoid %f -> newlib float printf, which the
+         * -nostartfiles chip can't link). */
+        DCHIP("  NDC*1000: x0=%ld y0=%ld x1=%ld y1=%ld",
+              (long)(x0_ndc * 1000.0f), (long)(y0_ndc * 1000.0f),
+              (long)(x1_ndc * 1000.0f), (long)(y1_ndc * 1000.0f));
     }
 
     BOOL ok = virgl_submit(gs, ctx_id, &cbuf);
 
     if (ok) {
-        chip_ResourceFlush(gs, gs->resource_id, x, y, w, h);
+        if (!gs->comp_rt_active)
+            chip_ResourceFlush(gs, gs->resource_id, x, y, w, h);
         DCHIP_V("draw_colored_quad: OK (%lu,%lu %lux%lu)",
               (unsigned long)x, (unsigned long)y,
               (unsigned long)w, (unsigned long)h);
@@ -844,5 +849,76 @@ BOOL chip_virgl_draw_colored_quad(struct ChipGPUState *gs,
         DCHIP("draw_colored_quad: SUBMIT FAILED");
     }
 
+    return ok;
+}
+
+/* -----------------------------------------------------------------------
+ * chip_virgl_draw_test_triangle -- Phase 6 "first triangle" milestone.
+ *
+ * Renders one classic RGB-corner triangle through the virgl 3D pipeline
+ * (passthrough VS + per-vertex colour FS + DRAW_VBO) into the scanout.  This
+ * exercises the EXACT path a Warp3D->virgl translation will use -- a vertex
+ * buffer of position+colour vertices submitted as a DRAW_VBO and presented --
+ * and verifies that the virgl 3D path renders real geometry on the host GL.
+ * Drawn each frame from the flush task when virgl_test_quad == 3.
+ * ----------------------------------------------------------------------- */
+BOOL chip_virgl_draw_test_triangle(struct ChipGPUState *gs)
+{
+    if (!gs->virgl_2d_ready || !gs->virgl_shaders_ok)
+        return FALSE;
+    if (!gs->virgl_2d_vbuf_res || !gs->virgl_2d_ve)
+        return FALSE;
+
+    uint32 ctx_id = gs->virgl_2d_ctx;
+
+    /* 3 vertices, NDC, classic RGB corners.  Layout: pos[4] + colour[4],
+     * stride 32 bytes -- same vertex format as chip_virgl_draw_colored_quad.
+     * static const: a non-static fully-constant array makes GCC synthesise a
+     * memcpy from .rodata, which pulls newlib's memcpy stub (__NewlibCall ->
+     * INewlib) and fails the -nostartfiles link. */
+    static const float verts[24] = {
+         0.0f,  0.6f, 0.0f, 1.0f,   1.0f, 0.0f, 0.0f, 1.0f,  /* top    red   */
+        -0.6f, -0.6f, 0.0f, 1.0f,   0.0f, 1.0f, 0.0f, 1.0f,  /* left   green */
+         0.6f, -0.6f, 0.0f, 1.0f,   0.0f, 0.0f, 1.0f, 1.0f,  /* right  blue  */
+    };
+
+    uint32 cmd_words[96];
+    struct VirglCmdBuf cbuf;
+    virgl_cmd_init(&cbuf, cmd_words, 96);
+
+    /* Ensure the per-vertex colour FS + passthrough VS are bound (the
+     * composite path may have left the texture FS bound). */
+    virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_VERTEX,   gs->virgl_2d_vs);
+    virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, gs->virgl_2d_fs);
+
+    virgl_upload_vertex_floats(&cbuf, gs->virgl_2d_vbuf_res, verts, 24);
+    {
+        struct VirglVertexBuffer vb;
+        vb.stride = 32;
+        vb.buffer_offset = 0;
+        vb.res_handle = gs->virgl_2d_vbuf_res;
+        virgl_cmd_set_vertex_buffers(&cbuf, 1, &vb);
+    }
+    virgl_cmd_draw_vbo(&cbuf,
+        0, 3, PIPE_PRIM_TRIANGLES,   /* start, count=3, mode */
+        0, 1,                         /* indexed=0, instance_count=1 */
+        0, 0,                         /* index_bias, start_instance */
+        0, 0,                         /* primitive_restart, restart_index */
+        0, 2,                         /* min_index, max_index */
+        0);                           /* cso_handle (0 = use bound state) */
+
+    static uint32 once = 0;
+    if (!once) {
+        once = 1;
+        DCHIP("draw_test_triangle: first 3D triangle DRAW_VBO (3 verts) "
+              "submitted via virgl ctx=%lu vbuf=%lu", ctx_id,
+              (unsigned long)gs->virgl_2d_vbuf_res);
+    }
+
+    BOOL ok = virgl_submit(gs, ctx_id, &cbuf);
+    if (ok)
+        chip_ResourceFlush(gs, gs->resource_id, 0, 0, gs->fb_width, gs->fb_height);
+    else
+        DCHIP("draw_test_triangle: SUBMIT FAILED");
     return ok;
 }

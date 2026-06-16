@@ -27,12 +27,12 @@ def updateKicklayout():
     out = []
     inserted = 0
     for ln in lines:
+        out.append(ln)
         stripped = ln.strip()
         if ((not inserted) and stripped.startswith("MODULE")
                 and stripped.find("PCIGraphics.card") != -1):
             out.append(module_line)
             inserted = 1
-        out.append(ln)
     if not inserted:
         return ("no 'MODULE Kickstart/PCIGraphics.card' line found "
                 "in " + kl)
@@ -84,7 +84,7 @@ def installExitHandler(page_nr, direction):
             asl.MessageBox("VirtIOGPU installer",
                 "Kicklayout update failed: " + err + "\n\n"
                 "Please add this line to SYS:Kickstart/Kicklayout\n"
-                "manually, BEFORE the PCIGraphics.card line:\n\n"
+                "manually, AFTER the PCIGraphics.card line:\n\n"
                 "MODULE Kickstart/virtiogpu.chip",
                 "OK")
         except StandardError:

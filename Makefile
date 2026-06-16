@@ -42,8 +42,6 @@ DOCKER_RUN    = docker run --rm -v "$(CURDIR):/work" -w /work $(DOCKER_IMAGE)
 BUILD_DIR   = build
 CHIP_TARGET = $(BUILD_DIR)/virtiogpu.chip
 MGL_TARGET  = $(BUILD_DIR)/minigl.library
-TOOL_TARGET = $(BUILD_DIR)/setup_monitor
-STUB_TARGET = $(BUILD_DIR)/monitor_stub
 COMP_TARGET = $(BUILD_DIR)/test_composite
 INFO_TARGET = $(BUILD_DIR)/virtiogpu_info
 
@@ -58,6 +56,7 @@ CHIP_SRC     = src/chip/chip_lib.c \
                src/chip/chip_virgl.c \
                src/chip/chip_virgl_2d.c \
                src/chip/chip_composite.c \
+               src/chip/chip_vram.c \
                src/chip/chip_flush.c \
                src/chip/chip_p96.c \
                src/chip/chip_alloc.c \
@@ -65,6 +64,7 @@ CHIP_SRC     = src/chip/chip_lib.c \
                src/chip/chip_modes.c \
                src/chip/chip_board.c \
                src/chip/chip_irq.c \
+               src/chip/chip_perf.c \
                src/chip/chip_init.c
 CHIP_OBJ     = $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(CHIP_SRC))
 CHIP_VQ_OBJ  = $(BUILD_DIR)/chip/virtqueue_chip.o
@@ -76,8 +76,7 @@ DEP = $(CHIP_OBJ:.o=.d) $(CHIP_VQ_OBJ:.o=.d) $(MGL_OBJ:.o=.d)
 
 .PHONY: all clean dist dist-lha help
 
-all: $(CHIP_TARGET) $(MGL_TARGET) $(TOOL_TARGET) $(STUB_TARGET) \
-     $(COMP_TARGET) $(INFO_TARGET)
+all: $(CHIP_TARGET) $(MGL_TARGET) $(COMP_TARGET) $(INFO_TARGET)
 
 $(CHIP_TARGET): $(CHIP_OBJ) $(CHIP_VQ_OBJ)
 	$(CC) $(CHIP_OBJ) $(CHIP_VQ_OBJ) -o $(CHIP_TARGET) $(CHIP_LDFLAGS)
@@ -96,14 +95,6 @@ $(MGL_TARGET): $(MGL_OBJ)
 $(BUILD_DIR)/minigl/%.o: src/minigl/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(MGL_CFLAGS) -c $< -o $@
-
-$(TOOL_TARGET): src/tools/setup_monitor.c
-	@mkdir -p $(BUILD_DIR)
-	$(CC) -O2 -Wall $< -o $@ -lauto
-
-$(STUB_TARGET): src/tools/monitor_stub.c
-	@mkdir -p $(BUILD_DIR)
-	$(CC) -O2 -Wall $< -o $@ -lauto
 
 $(COMP_TARGET): src/tools/test_composite.c
 	@mkdir -p $(BUILD_DIR)

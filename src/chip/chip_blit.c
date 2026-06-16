@@ -563,15 +563,42 @@ static void chip_FillRect(struct BoardInfo *bi, struct RenderInfoChip *ri,
     chip_prof_end(g_chip_state, &prof_fillrect, prof_t0,
                   (uint32)((ULONG)w * h * bpp));
 
-    /* Virgl path: GPU-side fill via CLEAR, skip convert+transfer overhead */
+    /* Item 3: GPU-accelerated large fill (gl=on / virgl path).  The CPU
+     * fill above keeps board_mem authoritative; here we additionally draw
+     * the rect GPU-side via a colored quad (scissor/viewport-correct, see
+     * chip_virgl_draw_colored_quad) and then deliberately do NOT mark it
+     * dirty -- so the flush task won't re-transfer this area, which is the
+     * saved work.  No-op unless ENV:virtiogpu_gpuaccel.  Restricted to the
+     * active screen, non-CLUT formats, large rects (GPU round-trip latency
+     * dominates small ones), and a scanout resource whose dims match
+     * fb_width/height (the basis of the quad's NDC mapping). */
     struct ChipGPUState *gs = g_chip_state;
-    if (gs && gs->virgl_2d_ready &&
-        ri->Memory == gs->board_mem)  /* only accelerate active screen */
+    if (gs && gs->gpuaccel_enabled && gs->virgl_2d_ready &&
+        !gs->virgl_ctx_error && gs->virgl_shaders_ok &&
+        gs->virgl_2d_vbuf_res && gs->virgl_2d_ve &&
+        ri->Memory == gs->board_mem &&
+        format != RGBFB_CLUT &&
+        gs->fb_width  == gs->virgl_2d_res_w &&
+        gs->fb_height == gs->virgl_2d_res_h &&
+        (ULONG)w * (ULONG)h >= gs->gpuaccel_min_area)
     {
-        if (chip_virgl_fill_rect(gs, (uint32)x, (uint32)y, w, h, color, format)) {
-            chip_flush_signal_activity(gs);
-            return;
+        float r, g, b, a;
+        if (bpp == 2) {
+            uint16 c = (uint16)color;
+            uint32 rv = (c >> 11) & 0x1F, gv = (c >> 5) & 0x3F, bv = c & 0x1F;
+            r = (float)((rv << 3) | (rv >> 2)) / 255.0f;
+            g = (float)((gv << 2) | (gv >> 4)) / 255.0f;
+            b = (float)((bv << 3) | (bv >> 2)) / 255.0f;
+            a = 1.0f;
+        } else {
+            /* A8R8G8B8 -- PPC BE uint32 0xAARRGGBB.  Opaque scanout fill. */
+            r = (float)((color >> 16) & 0xFF) / 255.0f;
+            g = (float)((color >>  8) & 0xFF) / 255.0f;
+            b = (float)((color      ) & 0xFF) / 255.0f;
+            a = 1.0f;
         }
+        if (chip_virgl_draw_colored_quad(gs, (uint32)x, (uint32)y, w, h, r, g, b, a))
+            return;   /* GPU drew + flushed; do not mark dirty */
     }
 
     chip_flush(x, y, w, h);
@@ -650,8 +677,13 @@ static void chip_BlitRect(struct BoardInfo *bi, struct RenderInfoChip *ri,
 
     /* Do NOT flush dest rect here -- flushing only the dest leaves the old
      * position stale on the GPU, causing ghost trails.  Signal the flush
-     * task instead so a single full-frame flush_all updates both old +
-     * new positions atomically (no ghosts). */
+     * task instead so a single flush_all updates both old + new positions
+     * atomically (no ghosts).
+     *
+     * Item 2: mark BOTH src and dst dirty so the dirty-rect present covers
+     * the moved content (no-op unless ENV:virtiogpu_dirtyrect). */
+    chip_mark_dirty(gs, x,  y,  w, h);
+    chip_mark_dirty(gs, dx, dy, w, h);
     chip_flush_signal_activity(g_chip_state);
 
     /* Record copy throughput.  bytes = pixels copied (one direction). */
@@ -799,6 +831,10 @@ static void chip_BlitRectNoMaskComplete(struct BoardInfo *bi,
         }
     }
 
+    /* Item 2: mark src + dst dirty for the dirty-rect present (no-op unless
+     * ENV:virtiogpu_dirtyrect). */
+    chip_mark_dirty(gs, x,  y,  w, h);
+    chip_mark_dirty(gs, dx, dy, w, h);
     chip_flush_signal_activity(g_chip_state);
 
     /* Record per-rop throughput.  bytes = pixels written. */

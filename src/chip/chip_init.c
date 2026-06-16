@@ -456,6 +456,33 @@ static BOOL chip_scan_pci_caps(struct ChipGPUState *gs)
                 gs->device_cfg_base = virt_addr;
                 DCHIP("DEVICE_CFG BAR%u+0x%lx -> 0x%08lx", (uint32)bar_num, offset, virt_addr);
                 break;
+            case VIRTIO_PCI_CAP_SHARED_MEMORY_CFG: {
+                /* Host-visible shared-memory region (struct virtio_pci_cap64):
+                 * id byte = shmid, offset/length are 64-bit.  This is the
+                 * window blob host-coherent resources are mapped into. */
+                uint8  shmid  = pciDev->ReadConfigByte(cap->CapOffset + VIRTIO_CAP_OFF_ID);
+                uint32 off_hi = pciDev->ReadConfigLong(cap->CapOffset + VIRTIO_CAP_OFF_OFFSET_HI);
+                uint32 len_lo = pciDev->ReadConfigLong(cap->CapOffset + VIRTIO_CAP_OFF_LENGTH);
+                uint32 len_hi = pciDev->ReadConfigLong(cap->CapOffset + VIRTIO_CAP_OFF_LENGTH_HI);
+                /* %llx is unsupported by DebugPrintF; print low 32 bits. */
+                DCHIP("SHARED_MEMORY_CFG shmid=%u BAR%u off=0x%lx(hi=0x%lx) "
+                      "len=0x%lx(hi=0x%lx) -> 0x%08lx",
+                      (uint32)shmid, (uint32)bar_num, offset, off_hi,
+                      len_lo, len_hi, virt_addr);
+                if (shmid == VIRTIO_GPU_SHM_ID_HOST_VISIBLE) {
+                    gs->has_host_visible    = TRUE;
+                    gs->host_visible_bar    = bar_num;
+                    gs->host_visible_shmid  = shmid;
+                    gs->host_visible_base   = virt_addr;
+                    gs->host_visible_size   = ((uint64)len_hi << 32) | len_lo;
+                    gs->host_visible_offset = ((uint64)off_hi << 32) | offset;
+                    gs->host_visible_alloc  = 0;
+                    DCHIP("Host-visible window READY: base=0x%08lx size=0x%lx "
+                          "(blob host-coherent path available)",
+                          virt_addr, len_lo);
+                }
+                break;
+            }
             default:
                 DCHIP("VirtIO PCI cap type %u BAR%u offset 0x%lx -- "
                       "unhandled cfg_type, ignored",
@@ -971,6 +998,13 @@ BOOL chip_InitCard_C(struct BoardInfo *bi, char **toolTypes, APTR cardDesc)
     gs->alloc_mutex = IExec->AllocSysObjectTags(ASOT_MUTEX,
         ASOMUTEX_Recursive, FALSE,
         TAG_END);
+    /* dirty_lock guards the Phase 7 dirty-rect accumulator (chip_perf.c).
+     * Non-recursive: drawing ops mark, the flush task takes; neither nests.
+     * Allocation failure is non-fatal -- chip_mark_dirty / chip_dirty_take
+     * NULL-check it and fall back to full-frame flushing. */
+    gs->dirty_lock = IExec->AllocSysObjectTags(ASOT_MUTEX,
+        ASOMUTEX_Recursive, FALSE,
+        TAG_END);
     if (!gs->io_lock || !gs->cursor_lock || !gs->alloc_mutex) {
         DCHIP("io_lock/cursor_lock/alloc_mutex alloc failed");
         goto fail_gs;   /* fail_gs frees gs + all locks NULL-safely */
@@ -1252,6 +1286,7 @@ BOOL chip_InitCard_C(struct BoardInfo *bi, char **toolTypes, APTR cardDesc)
         if (chip_ResourceCreateBlob(gs, gs->resource_id,
                                     VIRTIO_GPU_BLOB_MEM_GUEST,
                                     0,                /* no MAPPABLE -- we are the source */
+                                    0,                /* ctx_id: GUEST blob needs none */
                                     0,                /* blob_id only used for HOST3D */
                                     gs->fb_size,
                                     gs->fb_dma_list, gs->fb_dma_count)) {
@@ -1262,6 +1297,13 @@ BOOL chip_InitCard_C(struct BoardInfo *bi, char **toolTypes, APTR cardDesc)
             DCHIP("BLOB_MEM_GUEST create failed -- falling back to CREATE_2D");
         }
     }
+
+    /* NOTE: host-coherent (BLOB_MEM_HOST3D + MAPPABLE) blobs are rejected by
+     * QEMU virtio-gpu-gl (Venus-only; venus needs libdrm -> not buildable on a
+     * Windows host).  The chip_alloc_coherent_blob / MAP_BLOB plumbing + the
+     * host-visible window detection are kept (gated, inert here) for a future
+     * Linux-host Venus effort -- see reference_linux_virtio_gpu memory.  No
+     * boot-time self-test (it always failed + wasted a GPU round-trip). */
 
     if (!fb_resource_ok) {
         DCHIP("RESOURCE_CREATE_2D: format=%lu (B8G8R8X8_UNORM=2) %lux%lu",
@@ -1322,6 +1364,23 @@ BOOL chip_InitCard_C(struct BoardInfo *bi, char **toolTypes, APTR cardDesc)
         DCHIP("Fallback: board_mem = fb_mem");
     } else {
         DCHIP("Board mem virt=0x%08lx size=%lu", (uint32)gs->board_mem, gs->board_mem_size);
+        /* PERF (v53.184): board_mem holds ALL P96 bitmaps -- every FillRect /
+         * BltBitmap / template / pattern CPU draw writes here.  Left at the
+         * default MEMF_SHARED (cache-inhibited) attributes, a 512x512 fill is
+         * ~256K uncached stores straight to RAM -- the dominant cost of the
+         * 2D benchmark.  Set WRITE-THROUGH (cached writes that still propagate
+         * to RAM) so draws are cached/write-combined while the flush task's
+         * board_mem->fb_mem reads and any DMA stay coherent -- same policy as
+         * fb_mem.  (fb_mem fallback case already got write-through above.)
+         * Toggle CHIP_BOARDMEM_WT to 0 to A/B against the original
+         * cache-inhibited baseline. */
+#define CHIP_BOARDMEM_WT 1
+#if CHIP_BOARDMEM_WT
+        chip_immu_set_writethrough(IExec, gs->board_mem, gs->board_mem_size);
+        DCHIP("board_mem set WRITE-THROUGH (was cache-inhibited) -- faster 2D");
+#else
+        DCHIP("board_mem left CACHE-INHIBITED (CHIP_BOARDMEM_WT=0, baseline)");
+#endif
     }
     gs->active_format  = RGBFB_A8R8G8B8;  /* default until SetGC */
     gs->active_bpr     = width * 4;
@@ -1480,9 +1539,31 @@ BOOL chip_InitCard_C(struct BoardInfo *bi, char **toolTypes, APTR cardDesc)
      *     synthesised vblank, no AOS4 component blocked on this in
      *     bisect testing.
      */
+    /* ===== EXPERIMENT v53.165: BIF_BLITTER regime (mirror RadeonRX) =====
+     * RadeonRX sets BIF_BLITTER (and NOT GRANTDIRECTACCESS): graphics.library
+     * then routes 2D drawing through the chip vtable and allocates offscreen/
+     * friend bitmaps in BOARD memory (via AllocCardMem) -- which is the
+     * prerequisite for HW compositing (board-resident composite destinations).
+     * Our long-standing GRANTDIRECTACCESS regime does 2D in system RAM (CPU),
+     * so compositing is software.  Toggle to test the blitter regime, now that
+     * the blit vtable is much improved (post v53.160 NMC fix etc.).  Set to 0
+     * to restore the proven GRANTDIRECTACCESS regime. */
+/* 0 = proven GRANTDIRECTACCESS regime (v53.161): correct desktop, software
+ *     compositing, no trails.  This is the shipping default.
+ * 1 = experimental BIF_BLITTER regime (HW composite engages, but GPU
+ *     compositing is transfer-bound/buggy on QEMU virtio-gpu-gl -- see
+ *     reference_linux_virtio_gpu memory: host-coherent + Venus both blocked).
+ * Reverted to 0 (2026-06-15) after the GPU-compositing routes were exhausted. */
+#define CHIP_USE_BLITTER 0
+#if CHIP_USE_BLITTER
+    bi->Flags         = BIF_BLITTER | BIF_NOMASKBLITS | BIF_NOC2PBLITS
+                      | BIF_INDISPLAYCHAIN | BIF_HARDWARESPRITE
+                      | BIF_VBLANKINTERRUPT;
+#else
     bi->Flags         = BIF_GRANTDIRECTACCESS | BIF_NOMASKBLITS | BIF_NOC2PBLITS
                       | BIF_INDISPLAYCHAIN | BIF_HARDWARESPRITE
                       | BIF_VBLANKINTERRUPT;
+#endif
     /* SoftSpriteFlags = all supported formats: force the OS-drawn SOFT
      * sprite everywhere.
      *
@@ -1687,6 +1768,10 @@ fail_gs:
     if (gs->alloc_mutex) {
         IExec->FreeSysObject(ASOT_MUTEX, gs->alloc_mutex);
         gs->alloc_mutex = NULL;
+    }
+    if (gs->dirty_lock) {
+        IExec->FreeSysObject(ASOT_MUTEX, gs->dirty_lock);
+        gs->dirty_lock = NULL;
     }
     if (gs->io_lock) {
         IExec->FreeSysObject(ASOT_MUTEX, gs->io_lock);

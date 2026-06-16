@@ -44,6 +44,14 @@
 #define VIRTIO_GPU_CMD_GET_CAPSET_INFO          0x0108
 #define VIRTIO_GPU_CMD_GET_CAPSET               0x0109
 #define VIRTIO_GPU_CMD_GET_EDID                 0x010A
+#define VIRTIO_GPU_CMD_RESOURCE_ASSIGN_UUID     0x010B
+/* Blob create/scanout live in the 2D block (validated against the upstream
+ * Linux virtio_gpu.h enum, docs/reference + src/compat/linux/virtio_gpu.h).
+ * NOTE: our previous values (CREATE_BLOB=0x010D etc.) were WRONG -- they were
+ * computed without RESOURCE_ASSIGN_UUID (0x010B), so CREATE_BLOB collided with
+ * SET_SCANOUT_BLOB.  Fixed v53.175. */
+#define VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB     0x010C
+#define VIRTIO_GPU_CMD_SET_SCANOUT_BLOB         0x010D
 
 /* 3D context commands (requires VIRTIO_GPU_F_VIRGL) */
 #define VIRTIO_GPU_CMD_CTX_CREATE               0x0200
@@ -54,12 +62,9 @@
 #define VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D      0x0205
 #define VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D    0x0206
 #define VIRTIO_GPU_CMD_SUBMIT_3D                0x0207
-
-/* Blob resources (requires VIRTIO_GPU_F_RESOURCE_BLOB) */
-#define VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB     0x010D
-#define VIRTIO_GPU_CMD_SET_SCANOUT_BLOB         0x010E
-#define VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB        0x010F
-#define VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB      0x0110
+/* Blob map/unmap live in the 3D block (0x0208/9), NOT after the 2D block. */
+#define VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB        0x0208
+#define VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB      0x0209
 
 /* Cursor commands (sent on Queue 1) */
 #define VIRTIO_GPU_CMD_UPDATE_CURSOR            0x0300
@@ -73,6 +78,8 @@
 #define VIRTIO_GPU_RESP_OK_CAPSET_INFO          0x1102
 #define VIRTIO_GPU_RESP_OK_CAPSET               0x1103
 #define VIRTIO_GPU_RESP_OK_EDID                 0x1104
+#define VIRTIO_GPU_RESP_OK_RESOURCE_UUID        0x1105
+#define VIRTIO_GPU_RESP_OK_MAP_INFO             0x1106
 
 #define VIRTIO_GPU_RESP_ERR_UNSPEC              0x1200
 #define VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY       0x1201
@@ -413,5 +420,12 @@ struct virtio_gpu_resp_map_info {
 };
 
 #define VIRTIO_GPU_RESP_OK_MAP_INFO         0x1106
+
+/* map_info cache flags (VIRTIO_GPU_RESP_OK_MAP_INFO) */
+#define VIRTIO_GPU_MAP_CACHE_MASK     0x0f
+#define VIRTIO_GPU_MAP_CACHE_NONE     0x00
+#define VIRTIO_GPU_MAP_CACHE_CACHED   0x01
+#define VIRTIO_GPU_MAP_CACHE_UNCACHED 0x02
+#define VIRTIO_GPU_MAP_CACHE_WC       0x03
 
 #endif /* VIRTIO_GPU_PROTO_H */

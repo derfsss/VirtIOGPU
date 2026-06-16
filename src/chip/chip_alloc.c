@@ -238,6 +238,9 @@ static BOOL chip_FreeCardMem(struct BoardInfo *bi, APTR mem)
 {
     (void)bi;
     DCHIP_V("FreeCardMem: mem=%p", mem);
+    /* Drop any VRAM render-target cached for this block before it is freed
+     * and possibly reused for a different bitmap (v53.166 VRAM emulation). */
+    chip_vram_invalidate(g_chip_state, mem);
     return board_free(g_chip_state, mem);
 }
 
@@ -253,7 +256,9 @@ void chip_alloc_fill_vtable(struct BoardInfo *bi)
 {
     bi->AllocCardMem  = chip_AllocCardMem;
     bi->FreeCardMem   = chip_FreeCardMem;
-    bi->AllocBitMap   = NULL;
-    bi->FreeBitMap    = NULL;
-    bi->GetBitMapAttr = NULL;
+    /* AllocBitMap / FreeBitMap / GetBitMapAttr (slots 58/59/60) are left NULL
+     * so graphics.library's fallback handles them.  The v53.164 probe answered
+     * its question (graphics.library uses AllocCardMem, not AllocBitMap, in the
+     * BIF_BLITTER regime) and was removed -- see reference_linux_virtio_gpu /
+     * project_vram_emulation memory notes. */
 }

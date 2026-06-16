@@ -20,6 +20,7 @@
 #define VIRTIO_PCI_CAP_ISR_CFG     3  /* ISR status */
 #define VIRTIO_PCI_CAP_DEVICE_CFG  4  /* Device-specific configuration */
 #define VIRTIO_PCI_CAP_PCI_CFG     5  /* PCI configuration access */
+#define VIRTIO_PCI_CAP_SHARED_MEMORY_CFG 8 /* host-visible shared memory region */
 
 /*
  * Byte offsets within a VirtIO vendor-specific PCI capability structure.
@@ -44,6 +45,15 @@
 #define VIRTIO_CAP_OFF_OFFSET      8
 #define VIRTIO_CAP_OFF_LENGTH     12
 #define VIRTIO_CAP_OFF_NOTIFY_MULT 16  /* NOTIFY_CFG only */
+
+/* SHARED_MEMORY_CFG (type 8) uses struct virtio_pci_cap64: the +5 'id' byte is
+ * the shmid, and offset/length are 64-bit (low at +8/+12, high at +16/+20). */
+#define VIRTIO_CAP_OFF_ID          5   /* SHARED_MEMORY_CFG: shmid */
+#define VIRTIO_CAP_OFF_OFFSET_HI  16   /* SHARED_MEMORY_CFG: offset high dword */
+#define VIRTIO_CAP_OFF_LENGTH_HI  20   /* SHARED_MEMORY_CFG: length high dword */
+
+/* virtio-gpu host-visible shared-memory region id (enum virtio_gpu_shm_id) */
+#define VIRTIO_GPU_SHM_ID_HOST_VISIBLE 1
 
 /*
  * PCI_CFG capability access helpers (VirtIO spec 4.1.4.7).

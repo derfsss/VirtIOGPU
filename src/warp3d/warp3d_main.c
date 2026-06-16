@@ -15,6 +15,8 @@
 #include <stdarg.h>
 #include <cybergraphx/cybergraphics.h>
 #include <interfaces/cybergraphics.h>
+#include <devices/timer.h>
+#include <exec/io.h>
 
 /* cybergraphics.library -- used to lock the W3D_CC_BITMAP and read its base
  * address / stride / dims, so we render at the app bitmap's size and present
@@ -134,6 +136,51 @@ static void upload_vertex_floats(struct VirglCmdBuf *cbuf, uint32 res_handle,
 /* Bind the context's own render target as the framebuffer.  All warp3d draws
  * target the RT (not the live scanout); the chip composites the RT onto the
  * scanout each frame, so 3D coexists with the desktop without flicker. */
+/* W3D_SetBlendMode factor -> Gallium PIPE_BLENDFACTOR. */
+static uint32 w3d_blendfactor(uint32 w)
+{
+    switch (w) {
+    case W3D_ZERO:                return PIPE_BLENDFACTOR_ZERO;
+    case W3D_ONE:                 return PIPE_BLENDFACTOR_ONE;
+    case W3D_SRC_COLOR:           return PIPE_BLENDFACTOR_SRC_COLOR;
+    case W3D_DST_COLOR:           return PIPE_BLENDFACTOR_DST_COLOR;
+    case W3D_ONE_MINUS_SRC_COLOR: return PIPE_BLENDFACTOR_INV_SRC_COLOR;
+    case W3D_ONE_MINUS_DST_COLOR: return PIPE_BLENDFACTOR_INV_DST_COLOR;
+    case W3D_SRC_ALPHA:           return PIPE_BLENDFACTOR_SRC_ALPHA;
+    case W3D_ONE_MINUS_SRC_ALPHA: return PIPE_BLENDFACTOR_INV_SRC_ALPHA;
+    case W3D_DST_ALPHA:           return PIPE_BLENDFACTOR_DST_ALPHA;
+    case W3D_ONE_MINUS_DST_ALPHA: return PIPE_BLENDFACTOR_INV_DST_ALPHA;
+    case W3D_SRC_ALPHA_SATURATE:  return PIPE_BLENDFACTOR_SRC_ALPHA_SATURATE;
+    default:                      return PIPE_BLENDFACTOR_ONE;
+    }
+}
+
+#define W3D_HANDLE_BLEND_OPAQUE  310   /* COLORMASK only, no blend */
+#define W3D_HANDLE_BLEND_FUNC    311   /* app's W3D_SetBlendMode factors */
+
+/* Refresh the app-blend object when its factors changed, then bind opaque or
+ * blend per the W3D_BLENDING enable.  Appended into the draw's command buffer
+ * (so create+bind reach the host before the DRAW_VBO). */
+static void bind_blend(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
+{
+    if (wv->blend_funcs_dirty) {
+        uint32 s = w3d_blendfactor(wv->src_blend);
+        uint32 d = w3d_blendfactor(wv->dst_blend);
+        uint32 rt0 = VIRGL_BLEND_RT_BLEND_ENABLE(1)
+                   | VIRGL_BLEND_RT_RGB_FUNC(PIPE_BLEND_ADD)
+                   | VIRGL_BLEND_RT_RGB_SRC_FACTOR(s)
+                   | VIRGL_BLEND_RT_RGB_DST_FACTOR(d)
+                   | VIRGL_BLEND_RT_ALPHA_FUNC(PIPE_BLEND_ADD)
+                   | VIRGL_BLEND_RT_ALPHA_SRC_FACTOR(s)
+                   | VIRGL_BLEND_RT_ALPHA_DST_FACTOR(d)
+                   | VIRGL_BLEND_RT_COLORMASK(0xF);
+        virgl_cmd_create_blend(cbuf, W3D_HANDLE_BLEND_FUNC, 0, rt0);
+        wv->blend_funcs_dirty = FALSE;
+    }
+    virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_BLEND,
+        wv->blend_on ? W3D_HANDLE_BLEND_FUNC : W3D_HANDLE_BLEND_OPAQUE);
+}
+
 static void bind_rt_framebuffer(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
 {
     uint32 surf = wv->rt_surface[wv->draw_idx];
@@ -142,6 +189,8 @@ static void bind_rt_framebuffer(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
     /* bind our depth-test DSA (the chip's default DSA has depth off) */
     if (wv->dsa_handle)
         virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_DSA, wv->dsa_handle);
+    /* bind blend state (opaque, or the app's W3D_SetBlendMode factors) */
+    bind_blend(cbuf, wv);
 }
 
 /* Frame boundary (called from ClearBuffers/ClearDrawRegion): if geometry was
@@ -330,6 +379,27 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
         g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id, dcb.buf, dcb.dwords);
     }
 
+    /* Blend objects: opaque (default) + an app-blend object built from the
+     * W3D_SetBlendMode factors (init ONE/ONE = additive, the cow's default).
+     * bind_blend() selects between them per draw via W3D_BLENDING. */
+    {
+        uint32 bw2[64]; struct VirglCmdBuf bcb;   /* 2x create_blend = 24 words */
+        wv->src_blend = W3D_ONE; wv->dst_blend = W3D_ONE;
+        wv->blend_on = FALSE; wv->blend_funcs_dirty = FALSE;
+        virgl_cmd_init(&bcb, bw2, 64);
+        virgl_cmd_create_blend(&bcb, W3D_HANDLE_BLEND_OPAQUE, 0, VIRGL_BLEND_RT_OPAQUE);
+        virgl_cmd_create_blend(&bcb, W3D_HANDLE_BLEND_FUNC, 0,
+            VIRGL_BLEND_RT_BLEND_ENABLE(1)
+            | VIRGL_BLEND_RT_RGB_FUNC(PIPE_BLEND_ADD)
+            | VIRGL_BLEND_RT_RGB_SRC_FACTOR(PIPE_BLENDFACTOR_ONE)
+            | VIRGL_BLEND_RT_RGB_DST_FACTOR(PIPE_BLENDFACTOR_ONE)
+            | VIRGL_BLEND_RT_ALPHA_FUNC(PIPE_BLEND_ADD)
+            | VIRGL_BLEND_RT_ALPHA_SRC_FACTOR(PIPE_BLENDFACTOR_ONE)
+            | VIRGL_BLEND_RT_ALPHA_DST_FACTOR(PIPE_BLENDFACTOR_ONE)
+            | VIRGL_BLEND_RT_COLORMASK(0xF));
+        g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id, bcb.buf, bcb.dwords);
+    }
+
     /* Clear both buffers (colour+depth) so neither shows garbage initially. */
     {
         uint32 cw[16]; struct VirglCmdBuf cb; int b;
@@ -345,6 +415,31 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
      * straight into the app's W3D_CC_BITMAP on FlushFrame; the app blits that
      * bitmap into its own window. */
     wv->draw_idx = 0;
+
+    /* Lower the caller's task priority: the demo renders flat-out and warp3d
+     * runs in its task, so at low priority the desktop/input/flush tasks always
+     * preempt it -> cursor stays responsive under single-core TCG. */
+    {
+        struct Task *me = IExec->FindTask(NULL);
+        if (me) {
+            wv->saved_pri = (LONG)IExec->SetTaskPri(me, -5);
+            wv->pri_lowered = TRUE;
+        }
+    }
+
+    /* timer.device for the WaitIdle CPU-yield (created in the caller's task). */
+    wv->timer_mp = IExec->AllocSysObjectTags(ASOT_PORT, TAG_END);
+    if (wv->timer_mp) {
+        wv->timer_io = IExec->AllocSysObjectTags(ASOT_IOREQUEST,
+            ASOIOR_Size, sizeof(struct TimeRequest),
+            ASOIOR_ReplyPort, wv->timer_mp, TAG_END);
+        if (wv->timer_io &&
+            IExec->OpenDevice("timer.device", UNIT_MICROHZ,
+                              (struct IORequest *)wv->timer_io, 0) != 0) {
+            IExec->FreeSysObject(ASOT_IOREQUEST, wv->timer_io);
+            wv->timer_io = NULL;
+        }
+    }
 
     ctx->driver     = wv;
     ctx->drivertype = W3D_DRIVER_3DHW;
@@ -410,6 +505,15 @@ void w3d_DestroyContext(struct Warp3DIFace *Self, W3D_Context *ctx)
                                          wv->zres, wv->zsurf);
             g_IV3D->ReleaseContext(g_IV3D, wv->info.token);
         }
+        if (wv->timer_io) {
+            IExec->CloseDevice((struct IORequest *)wv->timer_io);
+            IExec->FreeSysObject(ASOT_IOREQUEST, wv->timer_io);
+        }
+        if (wv->timer_mp) IExec->FreeSysObject(ASOT_PORT, wv->timer_mp);
+        if (wv->pri_lowered) {
+            struct Task *me = IExec->FindTask(NULL);
+            if (me) IExec->SetTaskPri(me, wv->saved_pri);
+        }
         if (wv->cmdbuf) IExec->FreeVec(wv->cmdbuf);
         IExec->FreeVec(wv);
     }
@@ -436,6 +540,7 @@ uint32 w3d_SetState(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 state, ui
     wv = ctx->driver;
     if (action) wv->state |= state; else wv->state &= ~state;
     ctx->state = wv->state;
+    if (state & W3D_BLENDING) wv->blend_on = (action != 0);
     return W3D_SUCCESS;
 }
 
@@ -455,7 +560,24 @@ uint32 w3d_LockHardware(struct Warp3DIFace *Self, W3D_Context *ctx)
     return W3D_SUCCESS;
 }
 void w3d_UnLockHardware(struct Warp3DIFace *Self, W3D_Context *ctx) { (void)Self; (void)ctx; }
-void w3d_WaitIdle(struct Warp3DIFace *Self, W3D_Context *ctx)       { (void)Self; (void)ctx; }
+void w3d_WaitIdle(struct Warp3DIFace *Self, W3D_Context *ctx)
+{
+    struct W3DVirgl *wv;
+    (void)Self;
+    /* Yield the CPU briefly (the GPU work is already submitted/synchronous).
+     * The demo runs uncapped and calls WaitIdle several times per frame; this
+     * micro-sleep lets the desktop/input/flush tasks run under single-core TCG
+     * so the cursor doesn't freeze. */
+    if (!ctx || !ctx->driver) return;
+    wv = ctx->driver;
+    if (wv->timer_io) {
+        struct TimeRequest *tr = (struct TimeRequest *)wv->timer_io;
+        tr->Request.io_Command = TR_ADDREQUEST;
+        tr->Time.Seconds      = 0;
+        tr->Time.Microseconds = 300;
+        IExec->DoIO((struct IORequest *)tr);
+    }
+}
 uint32 w3d_CheckIdle(struct Warp3DIFace *Self, W3D_Context *ctx)    { (void)Self; (void)ctx; return TRUE; }
 
 uint32 w3d_SetBlendMode(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 s, uint32 d)
@@ -464,7 +586,10 @@ uint32 w3d_SetBlendMode(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 s, ui
     (void)Self;
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
-    wv->src_blend = s; wv->dst_blend = d;
+    if (wv->src_blend != s || wv->dst_blend != d) {
+        wv->src_blend = s; wv->dst_blend = d;
+        wv->blend_funcs_dirty = TRUE;   /* rebuild the app-blend object */
+    }
     return W3D_SUCCESS;
 }
 

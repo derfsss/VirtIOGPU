@@ -65,9 +65,11 @@ struct W3DVirgl {
     BOOL   pending_clear;
     uint32 clear_argb;
 
-    /* W3D state mirror (mostly inert in milestone 1) */
+    /* W3D state mirror */
     uint32 state;                   /* W3D_* enable bits */
     uint32 src_blend, dst_blend;    /* W3D_SetBlendMode funcs */
+    BOOL   blend_on;                /* W3D_BLENDING enabled */
+    BOOL   blend_funcs_dirty;       /* src/dst changed -> recreate blend obj */
 
     /* bound vertex arrays (W3D_VertexPointer / W3D_ColorPointer) */
     const UBYTE *vtx_ptr;  int vtx_stride;  uint32 vtx_mode;
@@ -84,6 +86,18 @@ struct W3DVirgl {
 
     /* Heap command buffer for large indexed draws (too big for the stack). */
     uint32      *cmdbuf;        /* CMDBUF_DWORDS words (= 64 KiB) */
+
+    /* timer.device for w3d_WaitIdle CPU yield -- the demo runs flat-out
+     * (FrameLimit=0) and calls WaitIdle several times/frame; a real W3D yields
+     * while the GPU works, so we micro-sleep to let the desktop/input/flush
+     * tasks run (otherwise the single TCG core starves -> frozen cursor). */
+    APTR         timer_mp;     /* struct MsgPort *  */
+    APTR         timer_io;     /* struct TimeRequest * */
+
+    /* Caller task priority lowered while a context is live (renders flat-out)
+     * so the desktop/input/flush tasks always preempt it; restored on destroy. */
+    LONG         saved_pri;
+    BOOL         pri_lowered;
 };
 
 #define W3D_CMDBUF_DWORDS  16384   /* 64 KiB -- the chip's SUBMIT_3D cap */

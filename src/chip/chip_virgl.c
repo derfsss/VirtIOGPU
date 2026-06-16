@@ -9,7 +9,17 @@
  *            virglrenderer/src/vrend_decode.c
  */
 
+#ifdef VIRGL_ENCODE_ONLY
+/* Compiled into warp3d.library: chip-free encoder only.  No ChipGPUState,
+ * no virgl_submit, no chip debug.  The chip build leaves this undefined so
+ * its compilation is byte-identical to before. */
+#include <exec/types.h>
+#ifndef DCHIP
+#define DCHIP(...)   do { } while (0)
+#endif
+#else
 #include "chip/chip_state.h"
+#endif
 #include "virgl/virgl_cmd.h"
 
 /* -----------------------------------------------------------------------
@@ -28,6 +38,7 @@ void virgl_cmd_reset(struct VirglCmdBuf *cbuf)
     cbuf->dwords = 0;
 }
 
+#ifndef VIRGL_ENCODE_ONLY
 /* Submit the accumulated command buffer via chip_Submit3D().
  * Returns TRUE on success.  Resets the command buffer afterwards. */
 BOOL virgl_submit(struct ChipGPUState *gs, uint32 ctx_id, struct VirglCmdBuf *cbuf)
@@ -51,6 +62,7 @@ BOOL virgl_submit(struct ChipGPUState *gs, uint32 ctx_id, struct VirglCmdBuf *cb
     }
     return ok;
 }
+#endif /* !VIRGL_ENCODE_ONLY */
 
 /* -----------------------------------------------------------------------
  * Helpers

@@ -1,0 +1,79 @@
+/*
+ * warp3d_internal.h -- private definitions for warp3d.library.
+ *
+ * warp3d.library implements the AmigaOS 4 Warp3D V5 API on top of the
+ * VirtIO-GPU virgl 3D pipeline, using the chip's "v3d" transport interface
+ * (see include/v3d/v3d_iface.h) to submit virgl command streams.
+ *
+ * This component is GPL (derived in spirit from Wazp3D's W3D->Gallium port);
+ * it is a SEPARATE binary from virtiogpu.chip, which stays non-GPL and only
+ * exposes the thin C-ABI "v3d" transport.
+ */
+#ifndef WARP3D_INTERNAL_H
+#define WARP3D_INTERNAL_H
+
+#include <exec/types.h>
+#include <exec/libraries.h>
+#include <exec/interfaces.h>
+#include <exec/memory.h>
+#include <dos/dos.h>
+#include <utility/tagitem.h>
+#include <proto/exec.h>
+
+#include <warp3d/warp3d.h>
+#include <interfaces/warp3d.h>
+
+#include "v3d/v3d_iface.h"
+#include "virgl/virgl_cmd.h"
+
+/* ---- globals (defined in warp3d_lib.c) ---- */
+extern struct ExecIFace *IExec;
+extern struct Library   *g_chipBase;   /* virtiogpu.chip */
+extern struct V3DIFace  *g_IV3D;       /* chip's "v3d" transport */
+
+/* ---- private per-context driver data (hung off W3D_Context.driver) ---- */
+struct W3DVirgl {
+    struct V3DContextInfo info;     /* handles into the chip's virgl pipeline */
+    uint32 fb_w, fb_h;              /* drawregion dims for window->NDC mapping */
+
+    /* W3D state mirror (mostly inert in milestone 1) */
+    uint32 state;                   /* W3D_* enable bits */
+    uint32 src_blend, dst_blend;    /* W3D_SetBlendMode funcs */
+
+    /* bound vertex arrays (W3D_VertexPointer / W3D_ColorPointer) */
+    const UBYTE *vtx_ptr;  int vtx_stride;  uint32 vtx_mode;
+    const UBYTE *col_ptr;  int col_stride;  uint32 col_fmt;
+};
+
+/* ---- debug (one switch; never use %f -> pulls newlib float printf) ---- */
+#ifndef W3D_DEBUG
+#define W3D_DEBUG 1
+#endif
+#if W3D_DEBUG
+#define DW3D(...) do { if (IExec) IExec->DebugPrintF("[warp3d.library] " __VA_ARGS__); } while (0)
+#else
+#define DW3D(...) do { } while (0)
+#endif
+
+/* ---- the W3D_* implementations (warp3d_main.c) ---- */
+W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error, struct TagItem *tags);
+void         w3d_DestroyContext(struct Warp3DIFace *Self, W3D_Context *ctx);
+uint32       w3d_GetState(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 state);
+uint32       w3d_SetState(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 state, uint32 action);
+uint32       w3d_CheckDriver(struct Warp3DIFace *Self);
+uint32       w3d_LockHardware(struct Warp3DIFace *Self, W3D_Context *ctx);
+void         w3d_UnLockHardware(struct Warp3DIFace *Self, W3D_Context *ctx);
+void         w3d_WaitIdle(struct Warp3DIFace *Self, W3D_Context *ctx);
+uint32       w3d_CheckIdle(struct Warp3DIFace *Self, W3D_Context *ctx);
+uint32       w3d_SetBlendMode(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 s, uint32 d);
+uint32       w3d_SetDrawRegion(struct Warp3DIFace *Self, W3D_Context *ctx, struct BitMap *bm, int yoff, W3D_Scissor *sc);
+uint32       w3d_DrawTriangle(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Triangle *tri);
+uint32       w3d_Flush(struct Warp3DIFace *Self, W3D_Context *ctx);
+void         w3d_FlushFrame(struct Warp3DIFace *Self, W3D_Context *ctx);
+uint32       w3d_ClearDrawRegion(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 color);
+uint32       w3d_AllocZBuffer(struct Warp3DIFace *Self, W3D_Context *ctx);
+uint32       w3d_VertexPointer(struct Warp3DIFace *Self, W3D_Context *ctx, void *p, int stride, uint32 mode, uint32 flags);
+uint32       w3d_ColorPointer(struct Warp3DIFace *Self, W3D_Context *ctx, void *p, int stride, uint32 fmt, uint32 mode, uint32 flags);
+uint32       w3d_DrawArray(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 prim, uint32 base, uint32 count);
+
+#endif /* WARP3D_INTERNAL_H */

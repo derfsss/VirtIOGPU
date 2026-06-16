@@ -15,7 +15,7 @@
  * ----------------------------------------------------------------------- */
 static const char chip_name[]  __attribute__((used)) = "virtiogpu.chip";
 static const char chip_idstr[] __attribute__((used)) =
-    "$VER: virtiogpu.chip 53.189 (16.06.2026)\r\n";
+    "$VER: virtiogpu.chip 53.190 (16.06.2026)\r\n";
 
 /* -----------------------------------------------------------------------
  * Global variable definitions
@@ -159,10 +159,15 @@ static const struct TagItem _chip_main_Tags[] __attribute__((used)) =
     { MIT_Version,     1                         },
     { TAG_DONE,        0                         }
 };
+/* "v3d" transport interface (chip_v3d.c) -- lets warp3d.library drive the
+ * chip's virgl 3D pipeline.  See include/v3d/v3d_iface.h. */
+extern const struct TagItem _chip_v3d_Tags[];
+
 static const ULONG _chip_Interfaces[] __attribute__((used)) =
 {
     (ULONG)_manager_Tags,
     (ULONG)_chip_main_Tags,
+    (ULONG)_chip_v3d_Tags,
     0
 };
 

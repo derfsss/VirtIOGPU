@@ -44,6 +44,7 @@ CHIP_TARGET = $(BUILD_DIR)/virtiogpu.chip
 MGL_TARGET  = $(BUILD_DIR)/minigl.library
 COMP_TARGET = $(BUILD_DIR)/test_composite
 INFO_TARGET = $(BUILD_DIR)/virtiogpu_info
+W3DTRI_TARGET = $(BUILD_DIR)/w3dtri
 
 # -----------------------------------------------------------------------
 # Chip driver sources (Picasso96 .chip plugin)
@@ -65,6 +66,7 @@ CHIP_SRC     = src/chip/chip_lib.c \
                src/chip/chip_board.c \
                src/chip/chip_irq.c \
                src/chip/chip_perf.c \
+               src/chip/chip_v3d.c \
                src/chip/chip_init.c
 CHIP_OBJ     = $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(CHIP_SRC))
 CHIP_VQ_OBJ  = $(BUILD_DIR)/chip/virtqueue_chip.o
@@ -72,11 +74,24 @@ CHIP_VQ_OBJ  = $(BUILD_DIR)/chip/virtqueue_chip.o
 MGL_SRC      = src/minigl/minigl_lib.c
 MGL_OBJ      = $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(MGL_SRC))
 
-DEP = $(CHIP_OBJ:.o=.d) $(CHIP_VQ_OBJ:.o=.d) $(MGL_OBJ:.o=.d)
+# -----------------------------------------------------------------------
+# warp3d.library (GPL) -- Warp3D V5 API over the chip's "v3d" transport.
+# Reuses src/chip/chip_virgl.c compiled with -DVIRGL_ENCODE_ONLY (chip-free
+# encoder; no ChipGPUState / virgl_submit).  Needs the SDK warp3d headers.
+# -----------------------------------------------------------------------
+W3D_TARGET   = $(BUILD_DIR)/warp3d.library
+W3D_CFLAGS   = -O2 -Wall -I./include -fno-tree-loop-distribute-patterns \
+               -mcrt=newlib -D__NOLIBBASE__ -D__NOGLOBALIFACE__ $(DEPFLAGS)
+W3D_LDFLAGS  = -mcrt=newlib -nostartfiles
+W3D_OBJ      = $(BUILD_DIR)/warp3d/warp3d_lib.o \
+               $(BUILD_DIR)/warp3d/warp3d_main.o \
+               $(BUILD_DIR)/warp3d/virgl_encode.o
+
+DEP = $(CHIP_OBJ:.o=.d) $(CHIP_VQ_OBJ:.o=.d) $(MGL_OBJ:.o=.d) $(W3D_OBJ:.o=.d)
 
 .PHONY: all clean dist dist-lha help
 
-all: $(CHIP_TARGET) $(MGL_TARGET) $(COMP_TARGET) $(INFO_TARGET)
+all: $(CHIP_TARGET) $(MGL_TARGET) $(W3D_TARGET) $(COMP_TARGET) $(INFO_TARGET) $(W3DTRI_TARGET)
 
 $(CHIP_TARGET): $(CHIP_OBJ) $(CHIP_VQ_OBJ)
 	$(CC) $(CHIP_OBJ) $(CHIP_VQ_OBJ) -o $(CHIP_TARGET) $(CHIP_LDFLAGS)
@@ -92,6 +107,17 @@ $(BUILD_DIR)/chip/virtqueue_chip.o: src/virtio/virtqueue.c
 $(MGL_TARGET): $(MGL_OBJ)
 	$(CC) $(MGL_OBJ) -o $(MGL_TARGET) $(MGL_LDFLAGS)
 
+$(W3D_TARGET): $(W3D_OBJ)
+	$(CC) $(W3D_OBJ) -o $(W3D_TARGET) $(W3D_LDFLAGS)
+
+$(BUILD_DIR)/warp3d/%.o: src/warp3d/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(W3D_CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/warp3d/virgl_encode.o: src/chip/chip_virgl.c
+	@mkdir -p $(dir $@)
+	$(CC) $(W3D_CFLAGS) -DVIRGL_ENCODE_ONLY -c $< -o $@
+
 $(BUILD_DIR)/minigl/%.o: src/minigl/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(MGL_CFLAGS) -c $< -o $@
@@ -101,6 +127,10 @@ $(COMP_TARGET): src/tools/test_composite.c
 	$(CC) -O2 -Wall $< -o $@ -lauto
 
 $(INFO_TARGET): src/tools/virtiogpu_info.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -O2 -Wall $< -o $@ -lauto
+
+$(W3DTRI_TARGET): src/tools/w3dtri.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) -O2 -Wall $< -o $@ -lauto
 

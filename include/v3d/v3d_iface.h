@@ -1,0 +1,71 @@
+/*
+ * v3d_iface.h -- shared "v3d" transport interface between virtiogpu.chip
+ * (provider) and warp3d.library (consumer).
+ *
+ * Permissively licensed, like the rest of the chip/project code, so that the
+ * GPL warp3d.library may include and call it.  The chip never links any GPL
+ * code -- this header only describes a thin C ABI.  The chip remains the sole
+ * owner of the virtio-gpu device; "v3d" lets an external renderer drive the
+ * chip's already-initialised virgl 3D pipeline.
+ *
+ * Obtained via:  IExec->GetInterface(chipLib, "v3d", 1, NULL) -> struct V3DIFace *
+ */
+#ifndef V3D_IFACE_H
+#define V3D_IFACE_H
+
+#include <exec/types.h>
+#include <exec/interfaces.h>
+
+struct BitMap;
+
+#define V3D_IFACE_NAME     "v3d"
+#define V3D_IFACE_VERSION  1
+
+/* Handles into the chip's live virgl 3D pipeline returned by ObtainContext.
+ * The vertex layout the chip's vbuf_res + ve_handle expect is
+ *   pos[4] + colour[4] interleaved floats, stride 32 bytes.
+ * All IDs are virgl object handles valid on ctx_id. */
+struct V3DContextInfo {
+    APTR   token;          /* opaque; pass back to Submit/Flush/ReleaseContext */
+    uint32 ctx_id;         /* virgl 3D context */
+    uint32 vbuf_res;       /* shared vertex-buffer resource (PIPE_BUFFER)      */
+    uint32 vbuf_size;      /* usable bytes in vbuf_res                          */
+    uint32 scanout_res;    /* on-screen 3D resource to flush/present           */
+    uint32 vs_handle;      /* position+colour vertex shader                    */
+    uint32 fs_handle;      /* per-vertex colour fragment shader                */
+    uint32 fs_tex_handle;  /* textured fragment shader                         */
+    uint32 ve_handle;      /* vertex elements (pos[4]+colour[4], stride 32)    */
+    uint32 fb_width;       /* destination width  (pixels)                      */
+    uint32 fb_height;      /* destination height (pixels)                      */
+    uint32 caps;           /* reserved feature bits                            */
+};
+
+struct V3DIFace {
+    struct InterfaceData Data;
+
+    uint32 (*Obtain)(struct V3DIFace *Self);
+    uint32 (*Release)(struct V3DIFace *Self);
+    APTR   (*Expunge)(struct V3DIFace *Self);
+    struct Interface *(*Clone)(struct V3DIFace *Self);
+
+    /* Fill *info from the chip's live virgl pipeline for rendering into dest.
+     * Returns TRUE if 3D is available (virgl negotiated + pipeline ready). */
+    BOOL (*ObtainContext)(struct V3DIFace *Self, struct BitMap *dest,
+                          struct V3DContextInfo *info);
+
+    /* Submit a pre-encoded virgl command stream: nwords 32-bit words already
+     * GP32-swapped by the virgl_cmd encoders.  Forwarded to SUBMIT_3D on
+     * ctx_id under the chip's io_lock. */
+    BOOL (*Submit)(struct V3DIFace *Self, APTR token, uint32 ctx_id,
+                   const uint32 *words, uint32 nwords);
+
+    /* Present a rectangle of res_id to the display (RESOURCE_FLUSH). */
+    BOOL (*Flush)(struct V3DIFace *Self, APTR token, uint32 res_id,
+                  uint32 x, uint32 y, uint32 w, uint32 h);
+
+    /* Release a context obtained via ObtainContext (no-op for the shared
+     * pipeline in milestone 1). */
+    void (*ReleaseContext)(struct V3DIFace *Self, APTR token);
+};
+
+#endif /* V3D_IFACE_H */

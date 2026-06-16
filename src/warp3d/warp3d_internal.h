@@ -53,7 +53,21 @@ struct W3DVirgl {
     /* bound vertex arrays (W3D_VertexPointer / W3D_ColorPointer) */
     const UBYTE *vtx_ptr;  int vtx_stride;  uint32 vtx_mode;
     const UBYTE *col_ptr;  int col_stride;  uint32 col_fmt;
+
+    /* W3D_InterleavedArray (the OS4 draw path) -- one packed array; position is
+     * always 3 floats at offset 0, remaining attributes follow in VFORMAT bit
+     * order.  We compute the colour offset for CPU vertex gather. */
+    const UBYTE *ia_ptr;
+    int          ia_stride;
+    uint32       ia_format;
+    BOOL         ia_has_color;  uint32 ia_color_off;
+    BOOL         ia_has_tcoord; uint32 ia_tcoord_off;
+
+    /* Heap command buffer for large indexed draws (too big for the stack). */
+    uint32      *cmdbuf;        /* CMDBUF_DWORDS words (= 64 KiB) */
 };
+
+#define W3D_CMDBUF_DWORDS  16384   /* 64 KiB -- the chip's SUBMIT_3D cap */
 
 /* ---- debug (one switch; never use %f -> pulls newlib float printf) ---- */
 #ifndef W3D_DEBUG
@@ -67,6 +81,9 @@ struct W3DVirgl {
 
 /* ---- the W3D_* implementations (warp3d_main.c) ---- */
 W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error, struct TagItem *tags);
+W3D_Context *w3d_CreateContextTags(struct Warp3DIFace *Self, uint32 *error, ...);
+W3D_Driver **w3d_GetDrivers(struct Warp3DIFace *Self);
+uint32       w3d_ClearBuffers(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Color *color, W3D_Double *depth, uint32 *stencil);
 void         w3d_DestroyContext(struct Warp3DIFace *Self, W3D_Context *ctx);
 uint32       w3d_GetState(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 state);
 uint32       w3d_SetState(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 state, uint32 action);
@@ -85,5 +102,10 @@ uint32       w3d_AllocZBuffer(struct Warp3DIFace *Self, W3D_Context *ctx);
 uint32       w3d_VertexPointer(struct Warp3DIFace *Self, W3D_Context *ctx, void *p, int stride, uint32 mode, uint32 flags);
 uint32       w3d_ColorPointer(struct Warp3DIFace *Self, W3D_Context *ctx, void *p, int stride, uint32 fmt, uint32 mode, uint32 flags);
 uint32       w3d_DrawArray(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 prim, uint32 base, uint32 count);
+uint32       w3d_InterleavedArray(struct Warp3DIFace *Self, W3D_Context *ctx, void *p, int stride, uint32 format, uint32 flags);
+uint32       w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 prim, uint32 type, uint32 count, void *indices);
+W3D_Texture *w3d_AllocTexObj(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 *error, struct TagItem *tags);
+W3D_Texture *w3d_AllocTexObjTags(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 *error, ...);
+void         w3d_FreeTexObj(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Texture *tex);
 
 #endif /* WARP3D_INTERNAL_H */

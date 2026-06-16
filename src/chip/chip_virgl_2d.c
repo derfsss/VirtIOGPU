@@ -76,8 +76,10 @@
 #define V2D_HANDLE_SAMPLER_LINEAR 109
 #define V2D_HANDLE_VE            110
 
-/* Vertex buffer size in bytes -- room for 1 quad (6 verts * 32 bytes = 192) */
-#define V2D_VBUF_SIZE            256
+/* Vertex buffer size in bytes.  64 KiB so warp3d.library can batch large
+ * indexed draws (e.g. the cow demo) into one INLINE_WRITE+DRAW_VBO submit;
+ * also fits the chip's own small quads/triangle. */
+#define V2D_VBUF_SIZE            65536
 
 /* -----------------------------------------------------------------------
  * chip_virgl_init_2d -- Create Virgl 2D acceleration context + 3D scanout.

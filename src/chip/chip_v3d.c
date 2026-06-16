@@ -34,7 +34,7 @@ static BOOL v3d_ObtainContext(struct V3DIFace *Self, struct BitMap *dest,
     info->token         = (APTR)gs;
     info->ctx_id        = gs->virgl_2d_ctx;
     info->vbuf_res      = gs->virgl_2d_vbuf_res;
-    info->vbuf_size     = 256;               /* chip allocates a 256-byte vbuf */
+    info->vbuf_size     = 65536;             /* chip vbuf (V2D_VBUF_SIZE) */
     info->scanout_res   = gs->resource_id;
     info->vs_handle     = gs->virgl_2d_vs;
     info->fs_handle     = gs->virgl_2d_fs;

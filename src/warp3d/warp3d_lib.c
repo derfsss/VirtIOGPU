@@ -15,9 +15,12 @@ struct ExecIFace *IExec      = NULL;
 struct Library   *g_chipBase = NULL;
 struct V3DIFace  *g_IV3D     = NULL;
 
-static const char w3d_name[]  __attribute__((used)) = "warp3d.library";
+/* Canonical AmigaOS4 name is "Warp3D.library" (capital W).  exec rejects a
+ * disk-loaded library whose romtag name does not case-match the OpenLibrary
+ * name, so this MUST match what apps pass (the cow demo opens "Warp3D.library"). */
+static const char w3d_name[]  __attribute__((used)) = "Warp3D.library";
 static const char w3d_idstr[] __attribute__((used)) =
-    "$VER: warp3d.library 53.1 (16.06.2026)\r\n";
+    "$VER: Warp3D.library 53.2 (16.06.2026)\r\n";
 
 /* ----------------------------------------------------------------------- */
 /* Generic stubs (unused-in-M1 methods).  The APTR cast in the vector table  */
@@ -85,7 +88,7 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)stub_ptr,              /* Clone   */
 
     (APTR)w3d_CreateContext,     /*  1 W3D_CreateContext       */
-    (APTR)stub_ptr,              /*  2 W3D_CreateContextTags   */
+    (APTR)w3d_CreateContextTags, /*  2 W3D_CreateContextTags   */
     (APTR)w3d_DestroyContext,    /*  3 W3D_DestroyContext      */
     (APTR)w3d_GetState,          /*  4 W3D_GetState            */
     (APTR)w3d_SetState,          /*  5 W3D_SetState            */
@@ -96,9 +99,9 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)w3d_CheckIdle,         /* 10 W3D_CheckIdle           */
     (APTR)stub_u32,              /* 11 W3D_Query               */
     (APTR)stub_u32,              /* 12 W3D_GetTexFmtInfo       */
-    (APTR)stub_ptr,              /* 13 W3D_AllocTexObj         */
-    (APTR)stub_ptr,              /* 14 W3D_AllocTexObjTags     */
-    (APTR)stub_void,             /* 15 W3D_FreeTexObj          */
+    (APTR)w3d_AllocTexObj,       /* 13 W3D_AllocTexObj         */
+    (APTR)w3d_AllocTexObjTags,   /* 14 W3D_AllocTexObjTags     */
+    (APTR)w3d_FreeTexObj,        /* 15 W3D_FreeTexObj          */
     (APTR)stub_void,             /* 16 W3D_ReleaseTexture      */
     (APTR)stub_void,             /* 17 W3D_FlushTextures       */
     (APTR)stub_u32,              /* 18 W3D_SetFilter           */
@@ -148,7 +151,7 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)stub_u32,              /* 62 W3D_GetDestFmt          */
     (APTR)stub_u32,              /* 63 W3D_DrawLineStrip       */
     (APTR)stub_u32,              /* 64 W3D_DrawLineLoop        */
-    (APTR)stub_ptr,              /* 65 W3D_GetDrivers          */
+    (APTR)w3d_GetDrivers,        /* 65 W3D_GetDrivers          */
     (APTR)stub_u32,              /* 66 W3D_QueryDriver         */
     (APTR)stub_u32,              /* 67 W3D_GetDriverTexFmtInfo */
     (APTR)stub_u32,              /* 68 W3D_RequestMode         */
@@ -170,24 +173,25 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)w3d_ColorPointer,      /* 84 W3D_ColorPointer        */
     (APTR)stub_u32,              /* 85 W3D_BindTexture         */
     (APTR)w3d_DrawArray,         /* 86 W3D_DrawArray           */
-    (APTR)stub_u32,              /* 87 W3D_DrawElements        */
+    (APTR)w3d_DrawElements,      /* 87 W3D_DrawElements        */
     (APTR)stub_void,             /* 88 W3D_SetFrontFace        */
     (APTR)stub_u32,              /* 89 W3D_SetTextureBlend     */
     (APTR)stub_u32,              /* 90 W3D_SetTextureBlendTags */
     (APTR)stub_u32,              /* 91 W3D_SecondaryColorPointer */
     (APTR)stub_u32,              /* 92 W3D_FogCoordPointer     */
-    (APTR)stub_u32,              /* 93 W3D_InterleavedArray    */
-    (APTR)stub_u32,              /* 94 W3D_ClearBuffers        */
+    (APTR)w3d_InterleavedArray,  /* 93 W3D_InterleavedArray    */
+    (APTR)w3d_ClearBuffers,      /* 94 W3D_ClearBuffers        */
     (APTR)stub_u32,              /* 95 W3D_SetParameter        */
     (APTR)stub_u32,              /* 96 W3D_SetMaxAnisotropy    */
     (APTR)-1                     /* sentinel */
 };
 static const struct TagItem _main_Tags[] __attribute__((used)) =
 {
-    { MIT_Name,        (Tag)"main"        },
-    { MIT_VectorTable, (Tag)_main_Vectors },
-    { MIT_Version,     1                  },
-    { TAG_DONE,        0                  }
+    { MIT_Name,        (Tag)"main"             },
+    { MIT_VectorTable, (Tag)_main_Vectors      },
+    { MIT_Version,     1                       },
+    { MIT_DataSize,    sizeof(struct Warp3DIFace) },
+    { TAG_DONE,        0                       }
 };
 
 static const ULONG _w3d_Interfaces[] __attribute__((used)) =
@@ -210,7 +214,7 @@ static struct Library *_w3d_Init(struct Library *libBase, ULONG seglist,
     libBase->lib_Node.ln_Name = (char *)w3d_name;
     libBase->lib_Flags        = LIBF_SUMUSED | LIBF_CHANGED;
     libBase->lib_Version      = 53;
-    libBase->lib_Revision     = 1;
+    libBase->lib_Revision     = 2;
     libBase->lib_IdString     = (APTR)w3d_idstr;
     return libBase;
 }

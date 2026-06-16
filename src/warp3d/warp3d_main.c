@@ -12,6 +12,7 @@
  * undefined INewlib at link).  The vertex arrays here are filled at runtime.
  */
 #include "warp3d_internal.h"
+#include <stdarg.h>
 
 /* Dependency-free tag scan (GetTagData lives in IUtility, which we don't
  * open).  Handles TAG_DONE/TAG_END, TAG_IGNORE, TAG_SKIP and TAG_MORE. */
@@ -207,6 +208,16 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
     wv->fb_w = wv->info.fb_width;
     wv->fb_h = wv->info.fb_height;
 
+    /* Heap command buffer for large indexed draws. */
+    wv->cmdbuf = IExec->AllocVecTags(W3D_CMDBUF_DWORDS * 4,
+                                     AVT_Type, MEMF_PRIVATE, TAG_DONE);
+    if (!wv->cmdbuf) {
+        IExec->FreeVec(ctx);
+        IExec->FreeVec(wv);
+        if (error) *error = W3D_NOMEMORY;
+        return NULL;
+    }
+
     /* M2: allocate our own render target (drawregion-sized) and register it as
      * a scanout overlay.  warp3d renders into the RT; the chip composites it
      * onto the scanout every frame -> stable, flicker-free. */
@@ -234,6 +245,39 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
     return ctx;
 }
 
+/* Varargs wrapper -- build a TagItem array from the inline tags and forward. */
+W3D_Context *w3d_CreateContextTags(struct Warp3DIFace *Self, uint32 *error, ...)
+{
+    struct TagItem tags[33];
+    va_list ap;
+    int n = 0;
+
+    va_start(ap, error);
+    while (n < 32) {
+        Tag t = va_arg(ap, Tag);
+        tags[n].ti_Tag = t;
+        if (t == TAG_DONE) break;
+        tags[n].ti_Data = va_arg(ap, uint32);
+        n++;
+    }
+    va_end(ap);
+    tags[n].ti_Tag = TAG_DONE;
+    tags[n].ti_Data = 0;
+    return w3d_CreateContext(Self, error, tags);
+}
+
+/* Advertise a single hardware driver so apps that enumerate W3D_GetDrivers()
+ * find and select us (and don't crash walking a NULL list). */
+W3D_Driver **w3d_GetDrivers(struct Warp3DIFace *Self)
+{
+    static char         drv_name[] = "VirtIOGPU";
+    static W3D_Driver   drv      = { 0 /*ChipID*/, 0xFFFFFFFF /*formats*/,
+                                     drv_name, FALSE /*swdriver=HW*/ };
+    static W3D_Driver  *drv_list[2] = { &drv, NULL };
+    (void)Self;
+    return drv_list;
+}
+
 void w3d_DestroyContext(struct Warp3DIFace *Self, W3D_Context *ctx)
 {
     (void)Self;
@@ -248,6 +292,7 @@ void w3d_DestroyContext(struct Warp3DIFace *Self, W3D_Context *ctx)
                                      wv->rt_res, wv->rt_surface);
             g_IV3D->ReleaseContext(g_IV3D, wv->info.token);
         }
+        if (wv->cmdbuf) IExec->FreeVec(wv->cmdbuf);
         IExec->FreeVec(wv);
     }
     IExec->FreeVec(ctx);
@@ -392,6 +437,175 @@ uint32 w3d_DrawArray(struct Warp3DIFace *Self, W3D_Context *ctx,
     return draw_packed(wv, verts, count, w3d_pipe_prim(prim));
 }
 
+/* ----------------------------------------------------------------------- */
+/* Textures -- minimal placeholder (real upload/sampling is task #31).        */
+/* Return a non-NULL W3D_Texture so apps that allocate+bind textures proceed   */
+/* to drawing geometry; actual sampling isn't wired yet (colour FS is used).   */
+/* ----------------------------------------------------------------------- */
+W3D_Texture *w3d_AllocTexObj(struct Warp3DIFace *Self, W3D_Context *ctx,
+                             uint32 *error, struct TagItem *tags)
+{
+    W3D_Texture *tex;
+    (void)Self; (void)ctx; (void)tags;
+    tex = IExec->AllocVecTags(sizeof(W3D_Texture),
+                              AVT_Type, MEMF_PRIVATE, AVT_ClearWithValue, 0, TAG_DONE);
+    if (!tex) { if (error) *error = W3D_NOMEMORY; return NULL; }
+    if (error) *error = W3D_SUCCESS;
+    return tex;
+}
+
+W3D_Texture *w3d_AllocTexObjTags(struct Warp3DIFace *Self, W3D_Context *ctx,
+                                 uint32 *error, ...)
+{
+    return w3d_AllocTexObj(Self, ctx, error, NULL);
+}
+
+void w3d_FreeTexObj(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Texture *tex)
+{
+    (void)Self; (void)ctx;
+    if (tex) IExec->FreeVec(tex);
+}
+
+/* ----------------------------------------------------------------------- */
+/* W3D_InterleavedArray + W3D_DrawElements -- the cow demo's OS4 draw path.   */
+/* Position is always 3 floats at offset 0; remaining attributes follow in    */
+/* VFORMAT bit order.  Positions are screen-space (the app projects them), so  */
+/* we map x,y -> NDC and reuse the existing pos[4]+colour[4] VS/FS via a CPU   */
+/* gather of the indexed vertices.                                            */
+/* ----------------------------------------------------------------------- */
+uint32 w3d_InterleavedArray(struct Warp3DIFace *Self, W3D_Context *ctx,
+                            void *p, int stride, uint32 format, uint32 flags)
+{
+    struct W3DVirgl *wv;
+    uint32 off;
+    (void)Self; (void)flags;
+
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+
+    wv->ia_ptr    = (const UBYTE *)p;
+    wv->ia_stride = stride;
+    wv->ia_format = format;
+    wv->ia_has_color = FALSE;  wv->ia_color_off  = 0;
+    wv->ia_has_tcoord = FALSE; wv->ia_tcoord_off = 0;
+
+    /* position = 3 floats @ 0; then attributes in ascending VFORMAT bit order */
+    off = 3 * 4;
+    if (format & W3D_VFORMAT_FOG)        off += 4;
+    if (format & W3D_VFORMAT_COLOR)      { wv->ia_has_color = TRUE; wv->ia_color_off = off; off += 16; }
+    else if (format & W3D_VFORMAT_PACK_COLOR) { off += 4; }  /* packed RGBA -- unsupported colour for now */
+    if (format & W3D_VFORMAT_SCOLOR)     off += 16;
+    else if (format & W3D_VFORMAT_PACK_SCOLOR) off += 4;
+    if (format & W3D_VFORMAT_TCOORD_0)   { wv->ia_has_tcoord = TRUE; wv->ia_tcoord_off = off; off += 8; }
+
+    return W3D_SUCCESS;
+}
+
+/* Emit a chunk of gathered, screen->NDC-converted vertices into cbuf as an
+ * INLINE_WRITE, then bind vbuf + draw.  Returns FALSE on submit failure. */
+static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
+                                uint32 idx_size, uint32 first, uint32 nverts,
+                                uint32 pipe_prim)
+{
+    struct VirglCmdBuf cbuf;
+    struct VirglVertexBuffer vb;
+    float fbw = (float)wv->fb_w, fbh = (float)wv->fb_h;
+    uint32 num_floats = nverts * 8;
+    uint32 i;
+
+    virgl_cmd_init(&cbuf, wv->cmdbuf, W3D_CMDBUF_DWORDS);
+    bind_rt_framebuffer(&cbuf, wv);
+
+    if (wv->pending_clear) {
+        float cr = (float)((wv->clear_argb >> 16) & 0xFF) / 255.0f;
+        float cg = (float)((wv->clear_argb >>  8) & 0xFF) / 255.0f;
+        float cb = (float)((wv->clear_argb      ) & 0xFF) / 255.0f;
+        float ca = (float)((wv->clear_argb >> 24) & 0xFF) / 255.0f;
+        virgl_cmd_clear(&cbuf, 4, cr, cg, cb, ca, 1.0, 0);
+        wv->pending_clear = FALSE;
+    }
+
+    virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_VERTEX,   wv->info.vs_handle);
+    virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, wv->info.fs_handle);
+
+    /* INLINE_WRITE header (11 words) for the vbuf, then the gathered floats. */
+    virgl_emit_dword(&cbuf, VIRGL_CMD_HDR(VIRGL_CCMD_RESOURCE_INLINE_WRITE, 0,
+                                          11 + num_floats));
+    virgl_emit_dword(&cbuf, wv->info.vbuf_res);
+    virgl_emit_dword(&cbuf, 0); virgl_emit_dword(&cbuf, 0);
+    virgl_emit_dword(&cbuf, 0); virgl_emit_dword(&cbuf, 0);
+    virgl_emit_dword(&cbuf, 0); virgl_emit_dword(&cbuf, 0); virgl_emit_dword(&cbuf, 0);
+    virgl_emit_dword(&cbuf, num_floats * 4); /* w = byte size */
+    virgl_emit_dword(&cbuf, 1); virgl_emit_dword(&cbuf, 1);
+
+    for (i = 0; i < nverts; i++) {
+        uint32 idx;
+        const UBYTE *v;
+        if      (idx_size == 4) idx = ((const uint32 *)idx_base)[first + i];
+        else if (idx_size == 2) idx = ((const UWORD  *)idx_base)[first + i];
+        else                    idx = ((const UBYTE  *)idx_base)[first + i];
+        v = wv->ia_ptr + idx * (uint32)wv->ia_stride;
+
+        {
+            float x = *(const float *)(v + 0);
+            float y = *(const float *)(v + 4);
+            virgl_emit_float(&cbuf, 2.0f * x / fbw - 1.0f);   /* ndc x */
+            virgl_emit_float(&cbuf, 2.0f * y / fbh - 1.0f);   /* ndc y */
+            virgl_emit_float(&cbuf, 0.0f);                    /* ndc z (depth: M3 #30) */
+            virgl_emit_float(&cbuf, 1.0f);                    /* w */
+        }
+        if (wv->ia_has_color) {
+            const float *c = (const float *)(v + wv->ia_color_off);
+            virgl_emit_float(&cbuf, c[0]);
+            virgl_emit_float(&cbuf, c[1]);
+            virgl_emit_float(&cbuf, c[2]);
+            virgl_emit_float(&cbuf, c[3]);
+        } else {
+            virgl_emit_float(&cbuf, 1.0f); virgl_emit_float(&cbuf, 1.0f);
+            virgl_emit_float(&cbuf, 1.0f); virgl_emit_float(&cbuf, 1.0f);
+        }
+    }
+
+    vb.stride = 32; vb.buffer_offset = 0; vb.res_handle = wv->info.vbuf_res;
+    virgl_cmd_set_vertex_buffers(&cbuf, 1, &vb);
+    virgl_cmd_draw_vbo(&cbuf, 0, nverts, pipe_prim, 0, 1, 0, 0, 0, 0,
+                       0, nverts - 1, 0);
+
+    return g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id,
+                          cbuf.buf, cbuf.dwords);
+}
+
+uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
+                        uint32 prim, uint32 type, uint32 count, void *indices)
+{
+    struct W3DVirgl *wv;
+    uint32 idx_size, pipe_prim, done;
+    /* Cap each submit so INLINE_WRITE + draw fit the 64 KiB SUBMIT_3D buffer:
+     * 11 + nverts*8 + ~40 overhead <= 16384 dwords -> nverts <= ~2040. */
+    const uint32 CHUNK = 2000;
+    (void)Self;
+
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    if (!wv->ia_ptr || !indices || count == 0) return W3D_ILLEGALINPUT;
+    if (!wv->cmdbuf) return W3D_NOMEMORY;
+
+    idx_size  = (type == W3D_INDEX_ULONG) ? 4 : (type == W3D_INDEX_UWORD) ? 2 : 1;
+    pipe_prim = w3d_pipe_prim(prim);
+
+    for (done = 0; done < count; done += CHUNK) {
+        uint32 n = count - done;
+        if (n > CHUNK) n = CHUNK;
+        if (!draw_elements_chunk(wv, (const UBYTE *)indices, idx_size,
+                                 done, n, pipe_prim)) {
+            DW3D("DrawElements: chunk submit failed at %lu/%lu\n",
+                 (unsigned long)done, (unsigned long)count);
+            return (uint32)-1;
+        }
+    }
+    return W3D_SUCCESS;
+}
+
 uint32 w3d_ClearDrawRegion(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 color)
 {
     struct W3DVirgl *wv;
@@ -404,6 +618,29 @@ uint32 w3d_ClearDrawRegion(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 co
      * as the geometry so the composite never sees a cleared-but-empty RT. */
     wv->pending_clear = TRUE;
     wv->clear_argb    = color;
+    return W3D_SUCCESS;
+}
+
+/* W3D_ClearBuffers: defer a colour clear (depth/stencil clear is task #30). */
+uint32 w3d_ClearBuffers(struct Warp3DIFace *Self, W3D_Context *ctx,
+                        W3D_Color *color, W3D_Double *depth, uint32 *stencil)
+{
+    struct W3DVirgl *wv;
+    uint32 a, r, g, b;
+    (void)Self; (void)depth; (void)stencil;
+
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    if (color) {
+        a = (uint32)(color->a * 255.0f) & 0xFF;
+        r = (uint32)(color->r * 255.0f) & 0xFF;
+        g = (uint32)(color->g * 255.0f) & 0xFF;
+        b = (uint32)(color->b * 255.0f) & 0xFF;
+        wv->clear_argb = (a << 24) | (r << 16) | (g << 8) | b;
+    } else {
+        wv->clear_argb = 0xFF000000;
+    }
+    wv->pending_clear = TRUE;
     return W3D_SUCCESS;
 }
 

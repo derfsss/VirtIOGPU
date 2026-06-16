@@ -44,7 +44,7 @@ int main(void)
     w  = (float)scr->Width;
     h  = (float)scr->Height;
 
-    W3DBase = IExec->OpenLibrary("warp3d.library", 0);
+    W3DBase = IExec->OpenLibrary("Warp3D.library", 0);
     if (!W3DBase) {
         printf("w3dtri: can't open warp3d.library\n");
         IIntuition->UnlockPubScreen(NULL, scr);

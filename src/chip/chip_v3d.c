@@ -40,6 +40,8 @@ static BOOL v3d_ObtainContext(struct V3DIFace *Self, struct BitMap *dest,
     info->fs_handle     = gs->virgl_2d_fs;
     info->fs_tex_handle = gs->virgl_2d_fs_tex;
     info->ve_handle     = gs->virgl_2d_ve;
+    info->sampler        = gs->virgl_2d_sampler;
+    info->sampler_linear = gs->virgl_2d_sampler_linear;
     info->fb_width      = gs->fb_width;
     info->fb_height     = gs->fb_height;
     info->caps          = 0;
@@ -215,6 +217,71 @@ static void v3d_FreeRenderTarget(struct V3DIFace *Self, APTR token,
         chip_ResourceUnref(gs, res);
 }
 
+static BOOL v3d_CreateTexture(struct V3DIFace *Self, APTR token,
+                              uint32 w, uint32 h, APTR data, uint32 src_bpr,
+                              uint32 *view_out, uint32 *res_out)
+{
+    struct ChipGPUState *gs = (struct ChipGPUState *)token;
+    uint32 res, view, words[32];
+    struct VirglCmdBuf cb;
+    (void)Self;
+
+    if (!gs || !data || !view_out || !res_out || !w || !h) return FALSE;
+    if (!gs->virgl_2d_ready || gs->virgl_ctx_error)         return FALSE;
+
+    res = chip_alloc_resource_id(gs);
+    if (!chip_ResourceCreate3D(gs, res, PIPE_TEXTURE_2D,
+            PIPE_FORMAT_R8G8B8A8_UNORM, PIPE_BIND_SAMPLER_VIEW,
+            w, h, 1, 1, 0, 0, 0)) {
+        DCHIP("v3d: CreateTexture RESOURCE_CREATE_3D failed");
+        return FALSE;
+    }
+    chip_CTXAttachResource(gs, gs->virgl_2d_ctx, res);
+
+    /* GP32-swap of a BE 0xRRGGBBAA pixel yields host LE bytes [R,G,B,A] --
+     * exactly what R8G8B8A8_UNORM expects, so the strip uploader is correct. */
+    if (!chip_comp_upload_pixels_32bpp(gs, res, (const uint32 *)data,
+                                       src_bpr ? src_bpr : w * 4, 0, 0, w, h)) {
+        DCHIP("v3d: CreateTexture pixel upload failed");
+        chip_ResourceUnref(gs, res);
+        return FALSE;
+    }
+
+    view = v3d_handle(gs);
+    virgl_cmd_init(&cb, words, 32);
+    virgl_cmd_create_sampler_view(&cb, view, res, PIPE_FORMAT_R8G8B8A8_UNORM,
+        0, 0, PIPE_SWIZZLE_RED, PIPE_SWIZZLE_GREEN,
+        PIPE_SWIZZLE_BLUE, PIPE_SWIZZLE_ALPHA);
+    if (!chip_Submit3D(gs, gs->virgl_2d_ctx, cb.buf, cb.dwords * 4)) {
+        DCHIP("v3d: CreateTexture sampler view FAILED");
+        chip_ResourceUnref(gs, res);
+        return FALSE;
+    }
+
+    *view_out = view;
+    *res_out  = res;
+    DCHIP("v3d: CreateTexture -> res=%lu view=%lu %lux%lu",
+          (unsigned long)res, (unsigned long)view,
+          (unsigned long)w, (unsigned long)h);
+    return TRUE;
+}
+
+static void v3d_FreeTexture(struct V3DIFace *Self, APTR token,
+                            uint32 res, uint32 view)
+{
+    struct ChipGPUState *gs = (struct ChipGPUState *)token;
+    uint32 words[8];
+    struct VirglCmdBuf cb;
+    (void)Self;
+    if (!gs) return;
+    if (view && !gs->virgl_ctx_error) {
+        virgl_cmd_init(&cb, words, 8);
+        virgl_cmd_destroy_object(&cb, VIRGL_OBJECT_SAMPLER_VIEW, view);
+        chip_Submit3D(gs, gs->virgl_2d_ctx, cb.buf, cb.dwords * 4);
+    }
+    if (res) chip_ResourceUnref(gs, res);
+}
+
 /* Composite the registered RT onto the scanout -- called by the flush task
  * each frame after flush_all so the 3D output persists over the desktop. */
 void chip_v3d_composite_overlay(struct ChipGPUState *gs)
@@ -266,6 +333,8 @@ const APTR _chip_v3d_Vectors[] __attribute__((used)) =
     (APTR)v3d_RegisterOverlay,  /* slot[9] */
     (APTR)v3d_FreeRenderTarget, /* slot[10] */
     (APTR)v3d_AllocDepthBuffer, /* slot[11] */
+    (APTR)v3d_CreateTexture,    /* slot[12] */
+    (APTR)v3d_FreeTexture,      /* slot[13] */
     (APTR)-1                    /* sentinel */
 };
 const struct TagItem _chip_v3d_Tags[] __attribute__((used)) =

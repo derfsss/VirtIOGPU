@@ -32,6 +32,13 @@ extern struct Library   *g_chipBase;   /* virtiogpu.chip */
 extern struct V3DIFace  *g_IV3D;       /* chip's "v3d" transport */
 
 /* ---- private per-context driver data (hung off W3D_Context.driver) ---- */
+/* Per-texture GPU handles, hung off W3D_Texture.driver. */
+struct W3DTexInfo {
+    uint32 res;     /* texture resource id */
+    uint32 view;    /* sampler view handle */
+    uint32 w, h;
+};
+
 struct W3DVirgl {
     struct V3DContextInfo info;     /* handles into the chip's virgl pipeline */
     uint32 fb_w, fb_h;              /* drawregion dims for window->NDC mapping */
@@ -48,6 +55,9 @@ struct W3DVirgl {
     /* Shared depth buffer + depth-test DSA (for correct occlusion). */
     uint32 zres, zsurf;             /* depth resource + surface (0 = none) */
     uint32 dsa_handle;              /* depth-test DSA object handle */
+
+    /* Currently bound texture (TMU 0), NULL = untextured (colour) draws. */
+    W3D_Texture *cur_tex;
 
     /* Deferred clear: ClearDrawRegion records the colour; the next draw emits
      * clear+draw in ONE submit so the chip's composite never observes the RT
@@ -116,5 +126,6 @@ uint32       w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx, uint32
 W3D_Texture *w3d_AllocTexObj(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 *error, struct TagItem *tags);
 W3D_Texture *w3d_AllocTexObjTags(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 *error, ...);
 void         w3d_FreeTexObj(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Texture *tex);
+uint32       w3d_BindTexture(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 tmu, W3D_Texture *tex);
 
 #endif /* WARP3D_INTERNAL_H */

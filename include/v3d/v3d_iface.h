@@ -35,6 +35,8 @@ struct V3DContextInfo {
     uint32 fs_handle;      /* per-vertex colour fragment shader                */
     uint32 fs_tex_handle;  /* textured fragment shader                         */
     uint32 ve_handle;      /* vertex elements (pos[4]+colour[4], stride 32)    */
+    uint32 sampler;        /* sampler state (nearest)                          */
+    uint32 sampler_linear; /* sampler state (linear)                           */
     uint32 fb_width;       /* destination width  (pixels)                      */
     uint32 fb_height;      /* destination height (pixels)                      */
     uint32 caps;           /* reserved feature bits                            */
@@ -95,6 +97,18 @@ struct V3DIFace {
     BOOL (*AllocDepthBuffer)(struct V3DIFace *Self, APTR token,
                              uint32 w, uint32 h,
                              uint32 *res_out, uint32 *surface_out);
+
+    /* Create an R8G8B8A8 texture (w x h), upload the pixel data (src_bpr =
+     * source bytes-per-row), and create a sampler view.  Returns the sampler
+     * view handle (bind to a fragment sampler slot) and the resource id.
+     * Free with FreeTexture. */
+    BOOL (*CreateTexture)(struct V3DIFace *Self, APTR token,
+                          uint32 w, uint32 h, APTR data, uint32 src_bpr,
+                          uint32 *view_out, uint32 *res_out);
+
+    /* Destroy a texture's sampler view + resource. */
+    void (*FreeTexture)(struct V3DIFace *Self, APTR token,
+                        uint32 res, uint32 view);
 };
 
 #endif /* V3D_IFACE_H */

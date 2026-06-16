@@ -507,24 +507,98 @@ W3D_Texture *w3d_AllocTexObj(struct Warp3DIFace *Self, W3D_Context *ctx,
                              uint32 *error, struct TagItem *tags)
 {
     W3D_Texture *tex;
-    (void)Self; (void)ctx; (void)tags;
+    struct W3DTexInfo *ti;
+    struct W3DVirgl *wv;
+    APTR   image;
+    uint32 w, h;
+    (void)Self;
+
+    if (!ctx || !ctx->driver) { if (error) *error = W3D_ILLEGALINPUT; return NULL; }
+    wv = ctx->driver;
+
+    image = (APTR)w3d_tagdata(tags, W3D_ATO_IMAGE, 0);
+    w     = w3d_tagdata(tags, W3D_ATO_WIDTH,  0);
+    h     = w3d_tagdata(tags, W3D_ATO_HEIGHT, 0);
+    DW3D("AllocTexObj: tags=%p image=%p w=%lu h=%lu\n", (void *)tags,
+         image, (unsigned long)w, (unsigned long)h);
+    if (!image || !w || !h) { if (error) *error = W3D_ILLEGALINPUT; return NULL; }
+
     tex = IExec->AllocVecTags(sizeof(W3D_Texture),
                               AVT_Type, MEMF_PRIVATE, AVT_ClearWithValue, 0, TAG_DONE);
-    if (!tex) { if (error) *error = W3D_NOMEMORY; return NULL; }
+    ti  = IExec->AllocVecTags(sizeof(struct W3DTexInfo),
+                              AVT_Type, MEMF_PRIVATE, AVT_ClearWithValue, 0, TAG_DONE);
+    if (!tex || !ti) {
+        if (tex) IExec->FreeVec(tex);
+        if (ti)  IExec->FreeVec(ti);
+        if (error) *error = W3D_NOMEMORY;
+        return NULL;
+    }
+
+    /* Upload as R8G8B8A8 (the cow's textures are 32bpp RGBA RAW). */
+    if (!g_IV3D->CreateTexture(g_IV3D, wv->info.token, w, h, image, w * 4,
+                               &ti->view, &ti->res)) {
+        DW3D("AllocTexObj: CreateTexture failed %lux%lu\n",
+             (unsigned long)w, (unsigned long)h);
+        IExec->FreeVec(tex); IExec->FreeVec(ti);
+        if (error) *error = W3D_NOMEMORY;
+        return NULL;
+    }
+    ti->w = w; ti->h = h;
+    tex->driver    = ti;
+    tex->texwidth  = (int)w;
+    tex->texheight = (int)h;
     if (error) *error = W3D_SUCCESS;
+    DW3D("AllocTexObj: OK %lux%lu res=%lu view=%lu\n",
+         (unsigned long)w, (unsigned long)h,
+         (unsigned long)ti->res, (unsigned long)ti->view);
     return tex;
 }
 
 W3D_Texture *w3d_AllocTexObjTags(struct Warp3DIFace *Self, W3D_Context *ctx,
                                  uint32 *error, ...)
 {
-    return w3d_AllocTexObj(Self, ctx, error, NULL);
+    struct TagItem tags[16];
+    va_list ap;
+    int n = 0;
+    va_start(ap, error);
+    while (n < 15) {
+        Tag t = va_arg(ap, Tag);
+        tags[n].ti_Tag = t;
+        if (t == TAG_DONE) break;
+        tags[n].ti_Data = va_arg(ap, uint32);
+        n++;
+    }
+    va_end(ap);
+    tags[n].ti_Tag = TAG_DONE; tags[n].ti_Data = 0;
+    return w3d_AllocTexObj(Self, ctx, error, tags);
 }
 
 void w3d_FreeTexObj(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Texture *tex)
 {
-    (void)Self; (void)ctx;
-    if (tex) IExec->FreeVec(tex);
+    struct W3DVirgl *wv;
+    (void)Self;
+    if (!tex) return;
+    if (ctx && ctx->driver) {
+        wv = ctx->driver;
+        if (wv->cur_tex == tex) wv->cur_tex = NULL;
+        if (tex->driver && g_IV3D) {
+            struct W3DTexInfo *ti = tex->driver;
+            g_IV3D->FreeTexture(g_IV3D, wv->info.token, ti->res, ti->view);
+            IExec->FreeVec(ti);
+        }
+    }
+    IExec->FreeVec(tex);
+}
+
+uint32 w3d_BindTexture(struct Warp3DIFace *Self, W3D_Context *ctx,
+                       uint32 tmu, W3D_Texture *tex)
+{
+    struct W3DVirgl *wv;
+    (void)Self;
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    if (tmu == 0) wv->cur_tex = tex;   /* only TMU0 (single-texture) */
+    return W3D_SUCCESS;
 }
 
 /* ----------------------------------------------------------------------- */
@@ -573,6 +647,9 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
     float fbw = (float)wv->fb_w, fbh = (float)wv->fb_h;
     uint32 num_floats = nverts * 8;
     uint32 i;
+    /* Textured draw if a texture is bound and the array carries texcoords. */
+    struct W3DTexInfo *ti = (wv->cur_tex && wv->cur_tex->driver && wv->ia_has_tcoord)
+                            ? (struct W3DTexInfo *)wv->cur_tex->driver : NULL;
 
     virgl_cmd_init(&cbuf, wv->cmdbuf, W3D_CMDBUF_DWORDS);
     bind_rt_framebuffer(&cbuf, wv);
@@ -586,8 +663,16 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
         wv->pending_clear = FALSE;
     }
 
-    virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_VERTEX,   wv->info.vs_handle);
-    virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, wv->info.fs_handle);
+    virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_VERTEX, wv->info.vs_handle);
+    if (ti) {
+        /* Textured: FS samples GENERIC[0] (the IN[1] slot = texcoord). */
+        virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, wv->info.fs_tex_handle);
+        virgl_cmd_bind_sampler_states(&cbuf, PIPE_SHADER_FRAGMENT, 0, 1,
+                                      &wv->info.sampler_linear);
+        virgl_cmd_set_sampler_views(&cbuf, PIPE_SHADER_FRAGMENT, 0, 1, &ti->view);
+    } else {
+        virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, wv->info.fs_handle);
+    }
 
     /* INLINE_WRITE header (11 words) for the vbuf, then the gathered floats. */
     virgl_emit_dword(&cbuf, VIRGL_CMD_HDR(VIRGL_CCMD_RESOURCE_INLINE_WRITE, 0,
@@ -616,7 +701,14 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
             virgl_emit_float(&cbuf, z);                       /* ndc z -> depth */
             virgl_emit_float(&cbuf, 1.0f);                    /* w */
         }
-        if (wv->ia_has_color) {
+        if (ti) {
+            /* texcoord -> GENERIC[0]; FS_TEX samples .xy */
+            const float *t = (const float *)(v + wv->ia_tcoord_off);
+            virgl_emit_float(&cbuf, t[0]);   /* u */
+            virgl_emit_float(&cbuf, t[1]);   /* v */
+            virgl_emit_float(&cbuf, 0.0f);
+            virgl_emit_float(&cbuf, 1.0f);
+        } else if (wv->ia_has_color) {
             const float *c = (const float *)(v + wv->ia_color_off);
             virgl_emit_float(&cbuf, c[0]);
             virgl_emit_float(&cbuf, c[1]);

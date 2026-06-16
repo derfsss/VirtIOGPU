@@ -171,7 +171,8 @@ BOOL chip_comp_init_blends(struct ChipGPUState *gs)
  *   x, y     -- destination offset within the resource
  *   w, h     -- strip dimensions in pixels
  * ----------------------------------------------------------------------- */
-static BOOL chip_comp_upload_pixels_32bpp(struct ChipGPUState *gs,
+/* Non-static: also used by chip_v3d.c (warp3d.library texture upload). */
+BOOL chip_comp_upload_pixels_32bpp(struct ChipGPUState *gs,
                                            uint32 res, const uint32 *src,
                                            uint32 src_bpr,
                                            uint32 x, uint32 y,

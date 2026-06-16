@@ -631,6 +631,11 @@ static inline uint32 chip_alloc_resource_id(struct ChipGPUState *gs)
  * scanout (called by the flush task each frame after flush_all). */
 void chip_v3d_composite_overlay(struct ChipGPUState *gs);
 
+/* chip_composite.c -- 32bpp texture strip upload (shared with chip_v3d.c). */
+BOOL chip_comp_upload_pixels_32bpp(struct ChipGPUState *gs,
+                                   uint32 res, const uint32 *src, uint32 src_bpr,
+                                   uint32 x, uint32 y, uint32 w, uint32 h);
+
 /* -----------------------------------------------------------------------
  * Lightweight wall-clock profiling primitive.
  *

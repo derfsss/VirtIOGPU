@@ -20,7 +20,7 @@ struct V3DIFace  *g_IV3D     = NULL;
  * name, so this MUST match what apps pass (the cow demo opens "Warp3D.library"). */
 static const char w3d_name[]  __attribute__((used)) = "Warp3D.library";
 static const char w3d_idstr[] __attribute__((used)) =
-    "$VER: Warp3D.library 53.6 (16.06.2026)\r\n";
+    "$VER: Warp3D.library 53.8 (16.06.2026)\r\n";
 
 /* ----------------------------------------------------------------------- */
 /* Generic stubs (unused-in-M1 methods).  The APTR cast in the vector table  */
@@ -171,7 +171,7 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)w3d_VertexPointer,     /* 82 W3D_VertexPointer       */
     (APTR)stub_u32,              /* 83 W3D_TexCoordPointer     */
     (APTR)w3d_ColorPointer,      /* 84 W3D_ColorPointer        */
-    (APTR)stub_u32,              /* 85 W3D_BindTexture         */
+    (APTR)w3d_BindTexture,       /* 85 W3D_BindTexture         */
     (APTR)w3d_DrawArray,         /* 86 W3D_DrawArray           */
     (APTR)w3d_DrawElements,      /* 87 W3D_DrawElements        */
     (APTR)stub_void,             /* 88 W3D_SetFrontFace        */
@@ -214,7 +214,7 @@ static struct Library *_w3d_Init(struct Library *libBase, ULONG seglist,
     libBase->lib_Node.ln_Name = (char *)w3d_name;
     libBase->lib_Flags        = LIBF_SUMUSED | LIBF_CHANGED;
     libBase->lib_Version      = 53;
-    libBase->lib_Revision     = 6;
+    libBase->lib_Revision     = 8;
     libBase->lib_IdString     = (APTR)w3d_idstr;
     return libBase;
 }

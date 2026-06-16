@@ -631,6 +631,11 @@ static inline uint32 chip_alloc_resource_id(struct ChipGPUState *gs)
  * scanout (called by the flush task each frame after flush_all). */
 void chip_v3d_composite_overlay(struct ChipGPUState *gs);
 
+/* chip_flush.c -- read the composited overlay frame back into board_mem (the
+ * P96 RTG bitmap) so ReadPixelArray/screenshots and real-HW scanout see it. */
+void chip_overlay_to_board(struct ChipGPUState *gs, uint32 x, uint32 y,
+                           uint32 w, uint32 h);
+
 /* chip_composite.c -- 32bpp texture strip upload (shared with chip_v3d.c). */
 BOOL chip_comp_upload_pixels_32bpp(struct ChipGPUState *gs,
                                    uint32 res, const uint32 *src, uint32 src_bpr,

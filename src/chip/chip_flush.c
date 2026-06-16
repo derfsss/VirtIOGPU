@@ -381,6 +381,130 @@ static void chip_convert_rect(struct ChipGPUState *gs, APTR dst_mem,
 }
 
 /* -----------------------------------------------------------------------
+ * Reverse converters: fb_mem (B8G8R8X8) -> board_mem (active 32bpp format).
+ *
+ * These are the inverses of the forward conv_row_* functions and exist so
+ * the warp3d overlay's composited frame can be written back into the P96
+ * RTG bitmap (board_mem) -- the buffer graphics.library ReadPixelArray reads
+ * and, on real hardware, the buffer that is actually scanned out.  Only the
+ * 32bpp truecolor formats are handled (3D screens are always truecolor);
+ * other formats return NULL and the readback is skipped.
+ *
+ * fb src uint32 is 0xBBGGRRXX on PPC BE (bytes [BB,GG,RR,XX]).
+ * ----------------------------------------------------------------------- */
+typedef void (*rev_conv_fn)(const uint32 *src, uint32 *dst, uint32 w);
+
+/* -> A8R8G8B8 board (0xAARRGGBB): byte-reverse the fb word, force A=0xFF. */
+static void rev_row_a8r8g8b8(const uint32 *src, uint32 *dst, uint32 w)
+{
+    for (uint32 c = 0; c < w; c++) {
+        uint32 s = src[c];                 /* 0xBBGGRRXX */
+        uint32 r = (s >> 24) | ((s & 0x00FF0000U) >> 8)
+                 | ((s & 0x0000FF00U) << 8) | (s << 24);   /* 0xXXRRGGBB */
+        dst[c] = (r & 0x00FFFFFFU) | 0xFF000000U;          /* 0xFFRRGGBB */
+    }
+}
+
+/* -> B8G8R8A8 board (0xBBGGRRAA): same layout, force A=0xFF. */
+static void rev_row_b8g8r8a8(const uint32 *src, uint32 *dst, uint32 w)
+{
+    for (uint32 c = 0; c < w; c++)
+        dst[c] = (src[c] & 0xFFFFFF00U) | 0x000000FFU;
+}
+
+/* -> R8G8B8A8 board (0xRRGGBBAA): swap R/B back, force A=0xFF. */
+static void rev_row_r8g8b8a8(const uint32 *src, uint32 *dst, uint32 w)
+{
+    for (uint32 c = 0; c < w; c++) {
+        uint32 s = src[c];                 /* 0xBBGGRRXX */
+        dst[c] = ((s & 0x0000FF00U) << 16)         /* RR -> top */
+               |  (s & 0x00FF0000U)                /* GG stays */
+               | ((s & 0xFF000000U) >> 16)         /* BB -> [15:8] */
+               |  0x000000FFU;                     /* AA = 0xFF */
+    }
+}
+
+/* -> A8B8G8R8 board (0xAABBGGRR): rotate fb right 8, force A=0xFF. */
+static void rev_row_a8b8g8r8(const uint32 *src, uint32 *dst, uint32 w)
+{
+    for (uint32 c = 0; c < w; c++)
+        dst[c] = (src[c] >> 8) | 0xFF000000U;
+}
+
+static rev_conv_fn chip_pick_rev_converter(RGBFTYPE fmt)
+{
+    switch (fmt) {
+    case RGBFB_A8R8G8B8:  return rev_row_a8r8g8b8;
+    case RGBFB_B8G8R8A8:  return rev_row_b8g8r8a8;
+    case RGBFB_R8G8B8A8:  return rev_row_r8g8b8a8;
+    case RGBFB_A8B8G8R8:  return rev_row_a8b8g8r8;
+    default:              return NULL;
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * chip_overlay_to_board -- read the composited overlay frame back from the
+ * scanout GPU resource into fb_mem, then reverse-convert it into board_mem
+ * so graphics.library ReadPixelArray (screenshots) and real-hardware scanout
+ * see the 3D output.  Called from chip_v3d_composite_overlay after the BLIT.
+ * QEMU display still comes from the host-side BLIT; this keeps board_mem in
+ * sync for capture / portability.  Best-effort: bails on unsupported format.
+ * ----------------------------------------------------------------------- */
+void chip_overlay_to_board(struct ChipGPUState *gs, uint32 x, uint32 y,
+                           uint32 w, uint32 h)
+{
+    struct ExecIFace *IExec;
+    rev_conv_fn rev;
+    APTR dst_base;
+    uint32 dst_bpp, pw, dst_stride, pan_x, pan_y, max_w, max_h, row;
+    struct virtio_gpu_box box;
+
+    if (!gs || !gs->fb_mem) return;
+    if (!gs->virgl_2d_ready || gs->virgl_ctx_error) return;
+
+    rev = chip_pick_rev_converter(gs->active_format);
+    if (!rev) return;                       /* non-truecolor: skip */
+
+    dst_base = gs->panning_mem ? gs->panning_mem : gs->board_mem;
+    if (!dst_base) return;
+
+    /* Pull the composited rect from the scanout resource into fb_mem (its
+     * attached backing).  resource_id is paired with fb_mem (both front). */
+    IExec = gs->IExec;
+    chip_zero(&box, sizeof(box));
+    box.x = x; box.y = y; box.w = w; box.h = h; box.d = 1;
+    if (!chip_TransferFromHost3D(gs, gs->virgl_2d_ctx, gs->resource_id,
+            0, gs->fb_stride, 0,
+            (uint64)y * gs->fb_stride + (uint64)x * 4, &box))
+        return;
+    (void)IExec;
+
+    dst_bpp    = chip_format_bpp(gs->active_format);
+    pw         = gs->panning_width ? gs->panning_width : gs->active_width;
+    dst_stride = pw * dst_bpp;
+
+    pan_x = (gs->pan_xoff > 0) ? (uint32)gs->pan_xoff : 0;
+    pan_y = (gs->pan_yoff > 0) ? (uint32)gs->pan_yoff : 0;
+
+    max_w = gs->active_width  < gs->fb_width  ? gs->active_width  : gs->fb_width;
+    max_h = gs->active_height < gs->fb_height ? gs->active_height : gs->fb_height;
+    if (x + w > max_w) w = (x < max_w) ? max_w - x : 0;
+    if (y + h > max_h) h = (y < max_h) ? max_h - y : 0;
+    if (w == 0 || h == 0) return;
+    if (pan_x + max_w > pw) pan_x = pw > max_w ? pw - max_w : 0;
+    if (pan_y + max_h > gs->fb_height)
+        pan_y = gs->fb_height > max_h ? gs->fb_height - max_h : 0;
+
+    for (row = y; row < y + h; row++) {
+        const uint32 *src_row = (const uint32 *)((UBYTE *)gs->fb_mem
+                              + row * gs->fb_stride + x * 4);
+        uint32 *dst_row = (uint32 *)((UBYTE *)dst_base
+                        + (row + pan_y) * dst_stride + (x + pan_x) * dst_bpp);
+        rev(src_row, dst_row, w);
+    }
+}
+
+/* -----------------------------------------------------------------------
  * chip_flush -- flush a dirty rectangle to the VirtIO GPU.
  * ----------------------------------------------------------------------- */
 void chip_flush(WORD x, WORD y, UWORD w, UWORD h)

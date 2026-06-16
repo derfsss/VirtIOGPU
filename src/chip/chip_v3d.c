@@ -311,6 +311,11 @@ void chip_v3d_composite_overlay(struct ChipGPUState *gs)
         chip_ResourceFlush(gs, gs->resource_id,
                            gs->v3d_overlay_x, gs->v3d_overlay_y,
                            gs->v3d_overlay_w, gs->v3d_overlay_h);
+        /* Mirror the composited frame into board_mem so ReadPixelArray
+         * (screenshots) and, on real hardware, the RTG scanout see the 3D
+         * output -- QEMU display already came from the BLIT above. */
+        chip_overlay_to_board(gs, gs->v3d_overlay_x, gs->v3d_overlay_y,
+                              gs->v3d_overlay_w, gs->v3d_overlay_h);
     } else {
         /* Don't keep retrying a failing composite (and don't let it wedge the
          * desktop further) -- drop the overlay. */

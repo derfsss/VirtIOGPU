@@ -122,10 +122,19 @@ static uint32 hw_dispatch(long slot, uint32 a, uint32 b, uint32 c, uint32 d, uin
      * it.  A bare return does NOT register -> GFXdriver has no mapping -> the FE
      * returns W3D_NODRIVER(-4).  TODO: replicate R200's slot18 GFX handshake.
      * (return 0 = "HW driver"; ==1 would mark CPU + risk the Warp3D_Init drop.) */
+    /* slot19 (off 0x98) = format-support query: FE calls it with (ctx,
+     * format_id, destfmt, 0) and the CreateContext format loop requires the
+     * return == 5 to treat the format as supported (else W3D_UNSUPPORTEDFMT -18).
+     * Return 5 to claim support. */
+    case 19: ret = 5;      break;
+    /* slot23 (off 0xa8) is the format-support query the cow's CreateContext
+     * actually hammers (format ids 0x6f-0x72,0x14-0x17 + destfmt); the loop
+     * needs == 5 to treat the format as supported (else -18 UNSUPPORTEDFMT). */
+    case 23: ret = 5;      break;
     case 57: ret = 0x48aa; break;   /* identify -> chip magic (informational)     */
     case 61: ret = (uint32)(APTR)g_dummy_state; break; /* ClearDrawRegion -> non-NULL */
     case 4:                         /* AllocZBuffer -> W3D_SUCCESS(0) (cow-checked)*/
-    case 22: case 23: case 42:      /* ReadZPixel/ReadZSpan/SetPenMask -> 0        */
+    case 22: case 42:               /* ReadZPixel/SetPenMask -> 0                  */
     default: ret = 0; break;
     }
     DBP("slot %ld ra=%08lx a=%08lx b=%08lx c=%08lx d=%08lx -> %08lx\n",

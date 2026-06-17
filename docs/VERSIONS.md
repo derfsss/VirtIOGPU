@@ -2027,6 +2027,65 @@ fails the `-nostartfiles` chip link.  Fix: `static const`.  Likewise never use
 
 ---
 
+## v53.190–53.209 — warp3d.library M1–M3 + Phase 8 Part A (gpu_srv I/O server)
+
+**Warp3D path (custom warp3d.library, 53.20).** Real `warp3d.library`
+(100-vector `Warp3DIFace`) drives the chip's new "v3d" transport interface,
+which translates W3D ops into the existing virgl DRAW_VBO core:
+
+- **M1 (53.190–197)** — first app-driven triangle through warp3d.library →
+  chip v3d → virgl. Thin transport keeps the chip non-GPL (it shares
+  `chip_virgl.c` via `VIRGL_ENCODE_ONLY`); warp3d.library is the GPL component.
+- **M2 (53.198–201)** — warp3d owns its own render-target resource and renders
+  into it (anti-flicker), mirrored to board_mem so `wb_screenshot` can read it.
+- **M3 (53.202–208)** — full CoW3D6 acceptance test renders correctly:
+  - `W3D_InterleavedArray` + `W3D_DrawElements` geometry.
+  - Textures: `W3D_AllocTexObjTags` varargs read from the va_list
+    `overflow_arg_area` (clib2 passes tag varargs on the stack); RAW upload.
+  - Z24X8 depth buffer + LESS test + cull; Gouraud + textured + depth-tested.
+  - Geometry Y-flip (`1.0f - 2.0f*y/fb_h`); V follows. Endianness BE↔LE verified.
+  - **Windowed**: render into the app's `W3D_CC_BITMAP` at the bitmap's own
+    dims (`GetCyberMapAttr`), `PresentBitmap` reads back RT → bitmap; the
+    full-screen overlay was dropped. Cow appears in a Workbench window.
+  - Additive/Porter-Duff blend objects via `bind_blend()`.
+
+**Phase 8 Part A — gpu_srv control-queue I/O server (the freeze fix).**
+We are a multi-consumer driver: the P96 desktop present, warp3d 3D draws and
+the soft-sprite cursor all share the ONE VirtIO control queue. The old model
+(single shared cmd_buf/resp_buf + io_lock held across the GPU round-trip)
+serialised them, so the cow's per-frame flood starved the cursor/desktop
+present → freeze under load.
+
+- New `src/chip/chip_gpu_srv.c`: a dedicated `virtiogpu.gpusrv` task (pri 5)
+  owns the control queue. Clients post a `struct GpuReq` (copy-model: caller's
+  cmd/data/resp in local memory, server copies to/from server-owned DMA
+  buffers) and block on their own reply — never on io_lock.
+- **Priority ports** (53.209): `gpu_srv_hi` (present/cursor, `ln_Pri > 0`) and
+  `gpu_srv_lo` (bulk draws). The server drains HI fully each pass, then does
+  ONE LO and re-checks HI, so the scanout present is never FIFO-starved behind
+  the cow's draws. Confirmed via `wb_screenshot` that under the 53.208 FIFO
+  build the cow rendered correctly into board_mem but the scanout stayed grey
+  (present starved) — priority routing targets exactly that.
+- **Deadlock fixes**: the two io_lock-holding control-queue callers were fixed
+  to release io_lock before the server-routed op — `chip_flush_all` (SB+DB
+  paths) and the `CompositeTags` hook. All other callers (init/perf/p96/
+  virgl_2d/vram) hold no io_lock, so are safe.
+- **Status**: built + committed (53.209) but **NOT runtime-verified**; the
+  deployed kickstart is still the FIFO 53.208. Caveat: `chip_Submit3D` is
+  PRI_DRAW(LO) for all callers, so CompositeTags window-draws may lag and may
+  need a priority param. Next session: deploy 53.209, verify cursor moves +
+  cow window shows on the actual display.
+
+**Phase 8 Part B (locked, not started)** — build a `W3D_VirtIOGPU.library` HW
+backend under the stock `Warp3D.library` front-end so ALL Warp3D/MiniGL apps
+work, not just via the custom warp3d.library. Backend ABI fully RE'd
+(`struct W3DHWIFace`, 83-slot vtable, `CreateContext(Self, W3D_Context*)`,
+79-op map). Ships a PINNED stock-FE version + our backend matched to its
+dispatch order (FE/backend order is version-specific). Do after Part A is
+verified.
+
+---
+
 ## Planned releases
 
 | Version | Phase | Objective |

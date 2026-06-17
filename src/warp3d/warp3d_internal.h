@@ -42,6 +42,9 @@ struct W3DTexInfo {
 struct W3DVirgl {
     struct V3DContextInfo info;     /* handles into the chip's virgl pipeline */
     uint32 fb_w, fb_h;              /* drawregion dims for window->NDC mapping */
+    struct BitMap *bm;              /* the W3D_CC_BITMAP -- present target (backend
+                                     * model: no scanout overlay, so every draw
+                                     * presents the RT into this app bitmap) */
 
     /* M2/M3: own DOUBLE-BUFFERED render targets -- warp3d draws into the back
      * buffer; on each frame's clear the completed buffer is registered as the

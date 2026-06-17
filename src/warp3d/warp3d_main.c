@@ -68,6 +68,30 @@ static BOOL bitmap_lock_base(struct BitMap *bm, APTR *lock_out, APTR *base)
     return TRUE;
 }
 
+/* Present the current render target into the app's W3D_CC_BITMAP.  In the BACKEND
+ * model there is NO scanout overlay compositing our RT (unlike the custom-lib
+ * scanout path), so the ONLY way the window updates is this readback->bitmap.
+ * Called after every draw (draw_packed) and on FlushFrame.  Clamp to the bitmap's
+ * real geometry so we never write past it. */
+static void frame_present(struct W3DVirgl *wv, struct BitMap *bm)
+{
+    APTR lock, base;
+    uint32 bpr = 0, bw = 0, bh = 0, pw, ph;
+
+    if (!g_IV3D || !g_IV3D->PresentBitmap || !bm) return;
+    if (!bitmap_geometry(bm, &bw, &bh, &bpr) || !bpr) return;
+    pw = wv->fb_w; if (bw && pw > bw) pw = bw; if (pw > bpr / 4) pw = bpr / 4;
+    ph = wv->fb_h; if (bh && ph > bh) ph = bh;
+    if (!pw || !ph) return;
+
+    if (bitmap_lock_base(bm, &lock, &base)) {
+        if (base)
+            g_IV3D->PresentBitmap(g_IV3D, wv->info.token, wv->rt_res[wv->draw_idx],
+                                  pw, ph, base, bpr);
+        g_ICyberGfx->UnLockBitMap(lock);
+    }
+}
+
 /* Dependency-free tag scan (GetTagData lives in IUtility, which we don't
  * open).  Handles TAG_DONE/TAG_END, TAG_IGNORE, TAG_SKIP and TAG_MORE. */
 static uint32 w3d_tagdata(struct TagItem *tags, uint32 tag, uint32 def)
@@ -256,6 +280,12 @@ static uint32 draw_packed(struct W3DVirgl *wv, const float *verts,
         return (uint32)-1;
     }
     wv->drawn_since_clear = TRUE;
+    /* BACKEND model: present the RT into the app bitmap right away -- the cow's
+     * test phase never calls FlushFrame, so without this the window stays grey.
+     * (Per-draw present is heavy under TCG; acceptable for first-light.) */
+    DW3D("draw_packed: %lu verts prim=%lu -> present bm=%p\n",
+         (unsigned long)nverts, (unsigned long)pipe_prim, (void *)wv->bm);
+    if (wv->bm) frame_present(wv, wv->bm);
     return W3D_SUCCESS;
 }
 
@@ -441,6 +471,7 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
         }
     }
 
+    wv->bm          = bm;           /* present target (backend model) */
     ctx->driver     = wv;
     ctx->drivertype = W3D_DRIVER_3DHW;
     ctx->drawregion = bm;
@@ -710,12 +741,14 @@ uint32 w3d_DrawTriFan(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Triangles 
 {
     (void)Self;
     if (!ctx || !ctx->driver || !t) return W3D_ILLEGALINPUT;
+    DW3D("DrawTriFan: %ld verts\n", (long)t->vertexcount);
     return w3d_draw_varray(ctx->driver, t->v, t->vertexcount, PIPE_PRIM_TRIANGLE_FAN);
 }
 uint32 w3d_DrawTriStrip(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Triangles *t)
 {
     (void)Self;
     if (!ctx || !ctx->driver || !t) return W3D_ILLEGALINPUT;
+    DW3D("DrawTriStrip: %ld verts\n", (long)t->vertexcount);
     return w3d_draw_varray(ctx->driver, t->v, t->vertexcount, PIPE_PRIM_TRIANGLE_STRIP);
 }
 
@@ -728,6 +761,7 @@ uint32 w3d_DrawTriangleV(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Triangl
     if (!ctx || !ctx->driver || !t || !t->v1 || !t->v2 || !t->v3)
         return W3D_ILLEGALINPUT;
     wv = ctx->driver;
+    DW3D("DrawTriangleV\n");
     pack_vertex(&verts[0],  t->v1, (float)wv->fb_w, (float)wv->fb_h);
     pack_vertex(&verts[8],  t->v2, (float)wv->fb_w, (float)wv->fb_h);
     pack_vertex(&verts[16], t->v3, (float)wv->fb_w, (float)wv->fb_h);
@@ -879,6 +913,7 @@ uint32 w3d_InterleavedArray(struct Warp3DIFace *Self, W3D_Context *ctx,
 
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
+    DW3D("InterleavedArray: stride=%ld fmt=%08lx\n", (long)stride, (unsigned long)format);
 
     wv->ia_ptr    = (const UBYTE *)p;
     wv->ia_stride = stride;
@@ -1007,6 +1042,7 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
 
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
+    DW3D("DrawElements: prim=%lu count=%lu\n", (unsigned long)prim, (unsigned long)count);
     if (!wv->ia_ptr || !indices || count == 0) return W3D_ILLEGALINPUT;
     if (!wv->cmdbuf) return W3D_NOMEMORY;
 
@@ -1059,6 +1095,7 @@ uint32 w3d_ClearDrawRegion(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 co
 
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
+    DW3D("ClearDrawRegion: argb=%08lx\n", (unsigned long)color);
 
     /* Frame boundary: swap completed buffer to the overlay, clear the new back. */
     frame_clear(wv, color);
@@ -1117,30 +1154,11 @@ uint32 w3d_Flush(struct Warp3DIFace *Self, W3D_Context *ctx)
 void w3d_FlushFrame(struct Warp3DIFace *Self, W3D_Context *ctx)
 {
     struct W3DVirgl *wv;
-    struct BitMap *bm;
-    APTR lock, base;
-    uint32 bpr = 0, bw = 0, bh = 0, pw, ph;
     (void)Self;
 
     w3d_Flush(Self, ctx);            /* finish any pending clear */
     if (!ctx || !ctx->driver) return;
     wv = ctx->driver;
-    if (!g_IV3D || !g_IV3D->PresentBitmap || !ctx->drawregion) return;
-    bm = (struct BitMap *)ctx->drawregion;
-
-    /* Read the rendered RT back into the app's W3D_CC_BITMAP so its
-     * BltBitMapRastPort picks up the 3D frame.  Clamp the presented rect to
-     * the bitmap's real geometry (stride/dims) so we never write out of
-     * bounds into adjacent card memory. */
-    if (!bitmap_geometry(bm, &bw, &bh, &bpr) || !bpr) return;
-    pw = wv->fb_w; if (bw && pw > bw) pw = bw; if (pw > bpr / 4) pw = bpr / 4;
-    ph = wv->fb_h; if (bh && ph > bh) ph = bh;
-    if (!pw || !ph) return;
-
-    if (bitmap_lock_base(bm, &lock, &base)) {
-        if (base)
-            g_IV3D->PresentBitmap(g_IV3D, wv->info.token, wv->rt_res[wv->draw_idx],
-                                  pw, ph, base, bpr);
-        g_ICyberGfx->UnLockBitMap(lock);
-    }
+    DW3D("FlushFrame: present\n");
+    frame_present(wv, (struct BitMap *)ctx->drawregion);
 }

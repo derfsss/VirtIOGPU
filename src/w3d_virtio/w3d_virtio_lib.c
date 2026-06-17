@@ -71,6 +71,11 @@ static uint32 hw_CreateContext(APTR Self, W3D_Context *ctx)
     ctx->width      = inner->width;
     ctx->height     = inner->height;
     inner->driver   = 0;                    /* keep wv; free only the shell  */
+    /* FE _Warp3D_W3D_SetTextureBlend returns -30 (W3D_NOTEXTURE) unless
+     * *(ctx+0xd0) > 4, then dispatches to slot72 (we return 0).  Claim >4 TMUs so
+     * the cow's per-frame SetTextureBlend succeeds (kills the -30 spam).  Best
+     * effort: if the FE re-writes ctx+0xd0 after we return, this is a no-op. */
+    *(volatile uint32 *)((UBYTE *)ctx + 0xd0) = 8;
     IExec->FreeVec(inner);
     if (IExec) IExec->DebugPrintF("[W3D_VirtIOGPU] hw_CreateContext OK driver=%08lx %ldx%ld\n",
         (unsigned long)(APTR)ctx->driver, (long)ctx->width, (long)ctx->height);

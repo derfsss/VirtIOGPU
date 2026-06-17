@@ -88,11 +88,28 @@ W3D_OBJ      = $(BUILD_DIR)/warp3d/warp3d_lib.o \
                $(BUILD_DIR)/warp3d/warp3d_main.o \
                $(BUILD_DIR)/warp3d/virgl_encode.o
 
-DEP = $(CHIP_OBJ:.o=.d) $(CHIP_VQ_OBJ:.o=.d) $(MGL_OBJ:.o=.d) $(W3D_OBJ:.o=.d)
+# -----------------------------------------------------------------------
+# W3D_VirtIOGPU.library (Phase 8 Part B) -- Warp3D V5 HW BACKEND loaded by the
+# stock Warp3D.library FE 53.27 from LIBS:Warp3D/HWdrivers/.  B1 = probe skeleton.
+# -----------------------------------------------------------------------
+W3DVIO_TARGET  = $(BUILD_DIR)/W3D_VirtIOGPU.library
+W3DVIO_CFLAGS  = -O2 -Wall -I./include -fno-tree-loop-distribute-patterns \
+                 -mcrt=newlib -D__NOLIBBASE__ -D__NOGLOBALIFACE__ $(DEPFLAGS)
+W3DVIO_LDFLAGS = -mcrt=newlib -nostartfiles
+W3DVIO_OBJ     = $(BUILD_DIR)/w3d_virtio/w3d_virtio_lib.o
+
+DEP = $(CHIP_OBJ:.o=.d) $(CHIP_VQ_OBJ:.o=.d) $(MGL_OBJ:.o=.d) $(W3D_OBJ:.o=.d) $(W3DVIO_OBJ:.o=.d)
 
 .PHONY: all clean dist dist-lha help
 
-all: $(CHIP_TARGET) $(MGL_TARGET) $(W3D_TARGET) $(COMP_TARGET) $(INFO_TARGET) $(W3DTRI_TARGET)
+all: $(CHIP_TARGET) $(MGL_TARGET) $(W3D_TARGET) $(W3DVIO_TARGET) $(COMP_TARGET) $(INFO_TARGET) $(W3DTRI_TARGET)
+
+$(W3DVIO_TARGET): $(W3DVIO_OBJ)
+	$(CC) $(W3DVIO_OBJ) -o $(W3DVIO_TARGET) $(W3DVIO_LDFLAGS)
+
+$(BUILD_DIR)/w3d_virtio/%.o: src/w3d_virtio/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(W3DVIO_CFLAGS) -c $< -o $@
 
 $(CHIP_TARGET): $(CHIP_OBJ) $(CHIP_VQ_OBJ)
 	$(CC) $(CHIP_OBJ) $(CHIP_VQ_OBJ) -o $(CHIP_TARGET) $(CHIP_LDFLAGS)

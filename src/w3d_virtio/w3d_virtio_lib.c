@@ -214,6 +214,28 @@ HWSTUB(60) HWSTUB(61) HWSTUB(62) HWSTUB(63) HWSTUB(64) HWSTUB(65) HWSTUB(66) HWS
 HWSTUB(70) HWSTUB(71) HWSTUB(72) HWSTUB(73) HWSTUB(74) HWSTUB(75) HWSTUB(76) HWSTUB(77) HWSTUB(78) HWSTUB(79)
 HWSTUB(80) HWSTUB(81) HWSTUB(82) HWSTUB(83) HWSTUB(84) HWSTUB(85) HWSTUB(86) HWSTUB(87)
 
+/* The FE's Warp3D_Init registration self-test calls slots 4 (AllocZBuffer) and
+ * 61 (ClearDrawRegion) with a BOGUS ctx (IO-space ptr, no CreateContext yet).
+ * The real render ops deref ctx->driver -> DSI crash.  Guard: only run the real
+ * op for a valid RAM ctx with a non-NULL driver (range-check FIRST so we never
+ * deref a bad ctx); otherwise return the registration-safe value. */
+static int ctx_ok(W3D_Context *ctx)
+{
+    uint32 c = (uint32)(APTR)ctx;
+    if (c < 0x10000000 || c >= 0x80000000) return 0;
+    return ctx->driver != 0;
+}
+static uint32 hw_AllocZBuffer(APTR Self, W3D_Context *ctx)
+{
+    if (!ctx_ok(ctx)) return 0;                            /* registration: SUCCESS */
+    return w3d_AllocZBuffer((struct Warp3DIFace *)Self, ctx);
+}
+static uint32 hw_ClearDrawRegion(APTR Self, W3D_Context *ctx, uint32 color)
+{
+    if (!ctx_ok(ctx)) return (uint32)(APTR)g_dummy_state;  /* registration: non-NULL */
+    return w3d_ClearDrawRegion((struct Warp3DIFace *)Self, ctx, color);
+}
+
 static const APTR _main_Vectors[] __attribute__((used)) =
 {
     (APTR)_main_Obtain,   /* slot 0  Obtain  */
@@ -223,7 +245,7 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     /* slots 4..87.  Geometry/lifecycle slots wired to the proven w3d_* render
      * core; the rest stay probe/tuned stubs (hw_sN).  Slot->op from
      * tmp_re/fe5327_map2.txt (backend off = 76 + slot*4). */
-    (APTR)w3d_AllocZBuffer, /* 4  AllocZBuffer  */
+    (APTR)hw_AllocZBuffer,  /* 4  AllocZBuffer (ctx-guarded) */
     (APTR)hw_s5,            /* 5  CheckIdle->1  */
     (APTR)hw_s6,            /* 6  ClearStencilBuffer */
     (APTR)w3d_ClearBuffers, /* 7  ClearBuffers  */
@@ -246,7 +268,7 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)hw_s57,           /* 57 identify -> 0x48aa (keep) */
     (APTR)w3d_FlushFrame,   /* 58 FlushFrame    */
     (APTR)hw_s59, (APTR)hw_s60,
-    (APTR)w3d_ClearDrawRegion, /* 61 ClearDrawRegion */
+    (APTR)hw_ClearDrawRegion, /* 61 ClearDrawRegion (ctx-guarded) */
     (APTR)hw_s62, (APTR)hw_s63, (APTR)hw_s64,
     (APTR)w3d_VertexPointer,/* 65 VertexPointer */
     (APTR)hw_s66,           /* 66 TexCoordPointer (stub: textures lag) */

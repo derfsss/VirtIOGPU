@@ -684,6 +684,85 @@ uint32 w3d_DrawArray(struct Warp3DIFace *Self, W3D_Context *ctx,
 }
 
 /* ----------------------------------------------------------------------- */
+/* Immediate-mode triangle ops -- the stock Warp3D FE's CreateContext test    */
+/* phase (DrawZtests/CheckBlendModes) draws via these, NOT DrawElements.       */
+/* The FE preserves ctx in r4, so each gets (Self, ctx, <struct*>).  M1: cap    */
+/* at 8 verts (the shared 256-byte vbuf) -- enough for the test quads/fans.     */
+/* ----------------------------------------------------------------------- */
+/* W3D_DrawTriFan / W3D_DrawTriStrip: W3D_Triangles { int vertexcount;          */
+/*   W3D_Vertex *v; ... } -- an inline vertex array.                            */
+static uint32 w3d_draw_varray(struct W3DVirgl *wv, const W3D_Vertex *v,
+                              int count, uint32 pipe_prim)
+{
+    float verts[64];          /* 8 verts * 8 floats */
+    int i;
+    if (!v || count < 3) return W3D_ILLEGALINPUT;
+    if (count > 8) {
+        DW3D("draw_varray: count %ld > 8 (M1 vbuf cap) -- clamped\n", (long)count);
+        count = 8;
+    }
+    for (i = 0; i < count; i++)
+        pack_vertex(&verts[i * 8], &v[i], (float)wv->fb_w, (float)wv->fb_h);
+    return draw_packed(wv, verts, (uint32)count, pipe_prim);
+}
+
+uint32 w3d_DrawTriFan(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Triangles *t)
+{
+    (void)Self;
+    if (!ctx || !ctx->driver || !t) return W3D_ILLEGALINPUT;
+    return w3d_draw_varray(ctx->driver, t->v, t->vertexcount, PIPE_PRIM_TRIANGLE_FAN);
+}
+uint32 w3d_DrawTriStrip(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Triangles *t)
+{
+    (void)Self;
+    if (!ctx || !ctx->driver || !t) return W3D_ILLEGALINPUT;
+    return w3d_draw_varray(ctx->driver, t->v, t->vertexcount, PIPE_PRIM_TRIANGLE_STRIP);
+}
+
+/* W3D_DrawTriangleV: W3D_TriangleV { W3D_Vertex *v1,*v2,*v3; ... } -- pointers. */
+uint32 w3d_DrawTriangleV(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_TriangleV *t)
+{
+    struct W3DVirgl *wv;
+    float verts[24];
+    (void)Self;
+    if (!ctx || !ctx->driver || !t || !t->v1 || !t->v2 || !t->v3)
+        return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    pack_vertex(&verts[0],  t->v1, (float)wv->fb_w, (float)wv->fb_h);
+    pack_vertex(&verts[8],  t->v2, (float)wv->fb_w, (float)wv->fb_h);
+    pack_vertex(&verts[16], t->v3, (float)wv->fb_w, (float)wv->fb_h);
+    return draw_packed(wv, verts, 3, PIPE_PRIM_TRIANGLES);
+}
+
+/* W3D_DrawTriFanV / W3D_DrawTriStripV: W3D_TrianglesV { int vertexcount;        */
+/*   W3D_Vertex **v; ... } -- an array of vertex POINTERS.                      */
+static uint32 w3d_draw_varrayV(struct W3DVirgl *wv, W3D_Vertex **v,
+                               int count, uint32 pipe_prim)
+{
+    float verts[64];
+    int i;
+    if (!v || count < 3) return W3D_ILLEGALINPUT;
+    if (count > 8) count = 8;
+    for (i = 0; i < count; i++) {
+        if (!v[i]) return W3D_ILLEGALINPUT;
+        pack_vertex(&verts[i * 8], v[i], (float)wv->fb_w, (float)wv->fb_h);
+    }
+    return draw_packed(wv, verts, (uint32)count, pipe_prim);
+}
+uint32 w3d_DrawTriFanV(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_TrianglesV *t)
+{
+    (void)Self;
+    if (!ctx || !ctx->driver || !t) return W3D_ILLEGALINPUT;
+    return w3d_draw_varrayV(ctx->driver, t->v, t->vertexcount, PIPE_PRIM_TRIANGLE_FAN);
+}
+uint32 w3d_DrawTriStripV(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_TrianglesV *t)
+{
+    (void)Self;
+    if (!ctx || !ctx->driver || !t) return W3D_ILLEGALINPUT;
+    return w3d_draw_varrayV(ctx->driver, t->v, t->vertexcount, PIPE_PRIM_TRIANGLE_STRIP);
+}
+
+/* ----------------------------------------------------------------------- */
 /* Textures -- minimal placeholder (real upload/sampling is task #31).        */
 /* Return a non-NULL W3D_Texture so apps that allocate+bind textures proceed   */
 /* to drawing geometry; actual sampling isn't wired yet (colour FS is used).   */

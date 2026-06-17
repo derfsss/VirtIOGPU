@@ -261,7 +261,9 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)w3d_SetBlendMode, /* 25 SetBlendMode  */
     (APTR)hw_s26, (APTR)hw_s27, (APTR)hw_s28, (APTR)hw_s29,
     (APTR)hw_s30, (APTR)hw_s31, (APTR)hw_s32, (APTR)hw_s33, (APTR)hw_s34, (APTR)hw_s35,
-    (APTR)hw_s36, (APTR)hw_s37, (APTR)hw_s38, (APTR)hw_s39,
+    (APTR)w3d_DrawTriStrip, /* 36 DrawTriStrip */
+    (APTR)w3d_DrawTriFan,   /* 37 DrawTriFan   */
+    (APTR)hw_s38, (APTR)hw_s39,
     (APTR)hw_s40, (APTR)hw_s41, (APTR)hw_s42, (APTR)hw_s43, (APTR)hw_s44, (APTR)hw_s45,
     (APTR)hw_s46, (APTR)hw_s47, (APTR)hw_s48, (APTR)hw_s49, (APTR)hw_s50, (APTR)hw_s51,
     (APTR)hw_s52, (APTR)hw_s53, (APTR)hw_s54, (APTR)hw_s55, (APTR)hw_s56,
@@ -269,7 +271,9 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)w3d_FlushFrame,   /* 58 FlushFrame    */
     (APTR)hw_s59, (APTR)hw_s60,
     (APTR)hw_ClearDrawRegion, /* 61 ClearDrawRegion (ctx-guarded) */
-    (APTR)hw_s62, (APTR)hw_s63, (APTR)hw_s64,
+    (APTR)w3d_DrawTriangleV, /* 62 DrawTriangleV */
+    (APTR)w3d_DrawTriStripV, /* 63 DrawTriStripV */
+    (APTR)w3d_DrawTriFanV,   /* 64 DrawTriFanV   */
     (APTR)w3d_VertexPointer,/* 65 VertexPointer */
     (APTR)hw_s66,           /* 66 TexCoordPointer (stub: textures lag) */
     (APTR)w3d_ColorPointer, /* 67 ColorPointer  */

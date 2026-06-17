@@ -275,8 +275,9 @@ struct ChipGPUState {
     /* Phase 8: GPU control-queue I/O server task (gpu_srv).  Owns CTRLQ; clients
      * post GpuReq messages instead of holding io_lock across the GPU wait. */
     struct Task    *gpu_srv_task;
-    struct MsgPort *gpu_srv_port;       /* published by the server when ready */
-    volatile BOOL   gpu_srv_running;
+    struct MsgPort *gpu_srv_hi;         /* high-pri reqs (present/cursor)  */
+    struct MsgPort *gpu_srv_lo;         /* low-pri reqs (bulk 3D draws)    */
+    volatile BOOL   gpu_srv_running;    /* set TRUE once both ports ready  */
     BOOL            clut_debug_done;    /* one-shot CLUT conversion debug */
     struct Task    *flush_task;         /* populated in flush task entry */
     int8            flush_sig_bit;      /* AllocSignal(-1) result, -1 if none */

@@ -621,14 +621,13 @@ static BOOL chip_SetDisplay(struct BoardInfo *bi, BOOL enabled)
             DCHIP("WARNING: CreateTaskTags failed for flush task "
                   "(will retry via dos.library in SetSwitch)");
         }
-        /* Phase 8: gpu_srv I/O server -- DISABLED pending the full refactor.
-         * Rerouting control-queue ops to the server deadlocks every caller that
-         * already holds io_lock around them (flush_all -- fixed; but also the
-         * CompositeTags hook chip_virgl_composite/chip_vram_composite, the
-         * resize/perf/zero-copy paths).  Until ALL those release io_lock before
-         * the server-routed call, leave the server OFF so chip_*_srv_do sees
-         * gpu_srv_port==NULL and every path uses the stable legacy io_lock route.
-         * if (chip_gpu_srv_start(gs)) DCHIP("gpu_srv: I/O server launched"); */
+        /* Phase 8: launch the GPU control-queue I/O server.  All io_lock-holding
+         * control-queue callers now release io_lock before server-routed ops
+         * (flush_all single+double, and the CompositeTags hook); other callers
+         * (init/resize/perf) never held io_lock around them.  So routing through
+         * the server is deadlock-free. */
+        if (chip_gpu_srv_start(gs))
+            DCHIP("gpu_srv: I/O server launched");
     }
 
     if (enabled) chip_flush_signal_activity(gs);

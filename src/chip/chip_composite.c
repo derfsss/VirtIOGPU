@@ -1021,8 +1021,12 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
         BOOL is_screen = (dst_planes0 == gs->panning_mem);
         uint32 result;
 
-        IExec->MutexObtain(gs->io_lock);
-
+        /* No io_lock here: the composite paths use ONLY server-routed GPU ops
+         * (virgl_submit->Submit3D, Transfer*, ResourceFlush), each a
+         * self-contained virgl cmd buffer (binds its own state + draws), and the
+         * WB compositor is single-task -> the gpu_srv serialises the ops.
+         * Holding io_lock here would deadlock (those ops route to the server,
+         * which must MutexObtain io_lock). */
         if (is_screen) {
             result = chip_virgl_composite(gs, Operator, Source,
                                            src_data, src_bpr, src_format,
@@ -1037,8 +1041,6 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
                                           dst_x, dst_y, dst_w, dst_h,
                                           flags, color0);
         }
-
-        IExec->MutexRelease(gs->io_lock);
 
         /* Fall back to software if HW can't handle it */
         if (result == COMPERR_SoftwareFallback || result != COMPERR_Success) {

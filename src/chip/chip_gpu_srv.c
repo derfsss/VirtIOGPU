@@ -86,28 +86,45 @@ static void gpu_srv_entry(void)
 {
     struct ChipGPUState *gs = g_chip_state;
     struct ExecIFace *IExec = gs ? gs->IExec : NULL;
-    struct MsgPort *port;
+    struct MsgPort *hi, *lo;
+    uint32 sig_hi, sig_lo;
     BOOL run = TRUE;
 
     if (!gs || !IExec) return;
 
-    port = (struct MsgPort *)IExec->AllocSysObjectTags(ASOT_PORT, TAG_END);
-    if (!port) { DCHIP("gpu_srv: port alloc failed"); return; }
+    hi = (struct MsgPort *)IExec->AllocSysObjectTags(ASOT_PORT, TAG_END);
+    lo = (struct MsgPort *)IExec->AllocSysObjectTags(ASOT_PORT, TAG_END);
+    if (!hi || !lo) {
+        DCHIP("gpu_srv: port alloc failed");
+        if (hi) IExec->FreeSysObject(ASOT_PORT, hi);
+        if (lo) IExec->FreeSysObject(ASOT_PORT, lo);
+        return;
+    }
+    sig_hi = 1UL << hi->mp_SigBit;
+    sig_lo = 1UL << lo->mp_SigBit;
 
-    gs->gpu_srv_port = port;
+    gs->gpu_srv_hi = hi;
+    gs->gpu_srv_lo = lo;
     __asm__ volatile ("" ::: "memory");
     gs->gpu_srv_running = TRUE;
-    DCHIP("gpu_srv: started (port=%p)", port);
+    DCHIP("gpu_srv: started (hi=%p lo=%p)", hi, lo);
 
     while (run) {
         struct GpuReq *req;
-        IExec->WaitPort(port);
-        while ((req = (struct GpuReq *)IExec->GetMsg(port))) {
-            if (req->op == GPUREQ_QUIT) {
-                run = FALSE;
+        IExec->Wait(sig_hi | sig_lo);
+
+        /* Strict priority: fully drain HI (present/cursor) every pass, then do
+         * ONE LO (bulk draw) and re-check HI -- so the desktop/cursor present is
+         * never starved behind the cow's flood of draws. */
+        for (;;) {
+            while ((req = (struct GpuReq *)IExec->GetMsg(hi))) {
+                if (req->op == GPUREQ_QUIT) { run = FALSE; IExec->ReplyMsg(&req->msg); break; }
+                gpu_srv_exec(gs, req);
                 IExec->ReplyMsg(&req->msg);
-                break;
             }
+            if (!run) break;
+            req = (struct GpuReq *)IExec->GetMsg(lo);
+            if (!req) break;                 /* both empty -> back to Wait */
             gpu_srv_exec(gs, req);
             IExec->ReplyMsg(&req->msg);
         }
@@ -115,8 +132,10 @@ static void gpu_srv_entry(void)
 
     gs->gpu_srv_running = FALSE;
     __asm__ volatile ("" ::: "memory");
-    gs->gpu_srv_port = NULL;
-    IExec->FreeSysObject(ASOT_PORT, port);
+    gs->gpu_srv_hi = NULL;
+    gs->gpu_srv_lo = NULL;
+    IExec->FreeSysObject(ASOT_PORT, hi);
+    IExec->FreeSysObject(ASOT_PORT, lo);
     DCHIP("gpu_srv: stopped");
 }
 
@@ -146,7 +165,7 @@ void chip_gpu_srv_stop(struct ChipGPUState *gs)
     struct GpuReq req;
     struct MsgPort *reply;
 
-    if (!gs->gpu_srv_running || !gs->gpu_srv_port) return;
+    if (!gs->gpu_srv_running || !gs->gpu_srv_hi) return;
 
     reply = (struct MsgPort *)IExec->AllocSysObjectTags(ASOT_PORT, TAG_END);
     if (!reply) return;
@@ -157,7 +176,7 @@ void chip_gpu_srv_stop(struct ChipGPUState *gs)
     req.msg.mn_Length       = sizeof(req);
     req.msg.mn_ReplyPort    = reply;
 
-    IExec->PutMsg(gs->gpu_srv_port, &req.msg);
+    IExec->PutMsg(gs->gpu_srv_hi, &req.msg);   /* QUIT on HI so it's seen promptly */
     IExec->WaitPort(reply);
     IExec->GetMsg(reply);
     IExec->FreeSysObject(ASOT_PORT, reply);
@@ -167,9 +186,10 @@ uint32 chip_gpu_srv_do(struct ChipGPUState *gs, struct GpuReq *req)
 {
     struct ExecIFace *IExec = gs->IExec;
     struct MsgPort *transient = NULL;
+    struct MsgPort *dest;
     uint32 r;
 
-    if (!gs->gpu_srv_port) return 0;   /* not ready -> caller uses legacy path */
+    if (!gs->gpu_srv_running) return 0;   /* not ready -> caller uses legacy path */
 
     if (!req->msg.mn_ReplyPort) {
         transient = (struct MsgPort *)IExec->AllocSysObjectTags(ASOT_PORT, TAG_END);
@@ -179,7 +199,9 @@ uint32 chip_gpu_srv_do(struct ChipGPUState *gs, struct GpuReq *req)
     req->msg.mn_Node.ln_Type = NT_MESSAGE;
     req->msg.mn_Length       = sizeof(*req);
 
-    IExec->PutMsg(gs->gpu_srv_port, &req->msg);
+    /* Priority routing: present/cursor (pri > 0) -> HI port; bulk draws -> LO. */
+    dest = (req->msg.mn_Node.ln_Pri > 0) ? gs->gpu_srv_hi : gs->gpu_srv_lo;
+    IExec->PutMsg(dest, &req->msg);
     IExec->WaitPort(req->msg.mn_ReplyPort);
     IExec->GetMsg(req->msg.mn_ReplyPort);
     r = req->result;

@@ -394,7 +394,7 @@ BOOL chip_TransferToHost3D(struct ChipGPUState *gs, uint32 ctx_id,
 
     /* Desktop present path -> route through the server at PRESENT priority so it
      * is serviced alongside (not starved by) the cow's draws. */
-    if (gs->gpu_srv_port) {
+    if (gs->gpu_srv_running) {
         chip_zero(&resp, sizeof(resp));
         rt = chip_srv_send2(gs, GPUREQ_PRI_PRESENT, &cmd, sizeof(cmd),
                             &resp, sizeof(resp));
@@ -444,7 +444,7 @@ BOOL chip_TransferFromHost3D(struct ChipGPUState *gs, uint32 ctx_id,
     cmd.box.h        = GP32(box->h);
     cmd.box.d        = GP32(box->d);
 
-    if (gs->gpu_srv_port) {
+    if (gs->gpu_srv_running) {
         chip_zero(&resp, sizeof(resp));
         rt = chip_srv_send2(gs, GPUREQ_PRI_NORMAL, &cmd, sizeof(cmd),
                             &resp, sizeof(resp));
@@ -495,7 +495,7 @@ BOOL chip_Submit3D(struct ChipGPUState *gs, uint32 ctx_id,
      * NOT hold io_lock across the GPU round-trip, so the cow's per-frame draws
      * no longer starve the (higher-priority) desktop/cursor present.  Falls back
      * to the legacy direct path until the server is up. */
-    if (gs->gpu_srv_port) {
+    if (gs->gpu_srv_running) {
         struct virtio_gpu_cmd_submit hdr;
         struct virtio_gpu_ctrl_hdr   resp;
         chip_zero(&hdr, sizeof(hdr));

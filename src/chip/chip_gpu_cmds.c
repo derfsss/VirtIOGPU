@@ -364,7 +364,7 @@ BOOL chip_SetScanout(struct ChipGPUState *gs,
 
     for (uint32 attempt = 0; attempt < 3; attempt++) {
         uint32 rt;
-        if (gs->gpu_srv_port) {
+        if (gs->gpu_srv_running) {
             chip_zero(&resp, sizeof(resp));
             rt = chip_srv_send2(gs, GPUREQ_PRI_PRESENT, &cmd, sizeof(cmd),
                                 &resp, sizeof(resp));
@@ -428,7 +428,7 @@ BOOL chip_TransferToHost2D(struct ChipGPUState *gs,
     cmd.offset      = GP64(offset);
     cmd.resource_id = GP32(resource_id);
 
-    if (gs->gpu_srv_port) {
+    if (gs->gpu_srv_running) {
         chip_zero(&resp, sizeof(resp));
         rt = chip_srv_send2(gs, GPUREQ_PRI_PRESENT, &cmd, sizeof(cmd),
                             &resp, sizeof(resp));
@@ -618,7 +618,7 @@ BOOL chip_ResourceFlush(struct ChipGPUState *gs,
     cmd.r.height    = GP32(height);
     cmd.resource_id = GP32(resource_id);
 
-    if (gs->gpu_srv_port) {
+    if (gs->gpu_srv_running) {
         chip_zero(&resp, sizeof(resp));
         rt = chip_srv_send2(gs, GPUREQ_PRI_PRESENT, &cmd, sizeof(cmd),
                             &resp, sizeof(resp));

@@ -111,6 +111,15 @@ $(BUILD_DIR)/w3d_virtio/%.o: src/w3d_virtio/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(W3DVIO_CFLAGS) -c $< -o $@
 
+# W3D_VirtIO.library -- Warp3D GFX DRIVER (Phase 8 B-gfx1), loaded from
+# LIBS:Warp3D/GFXdrivers/.  Same flags as the HW backend.  B-gfx1 = probe.
+$(BUILD_DIR)/W3D_VirtIO.library: $(BUILD_DIR)/w3d_virtio_gfx/w3d_virtio_gfx_lib.o
+	$(CC) $< -o $@ $(W3DVIO_LDFLAGS)
+
+$(BUILD_DIR)/w3d_virtio_gfx/%.o: src/w3d_virtio_gfx/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(W3DVIO_CFLAGS) -c $< -o $@
+
 $(CHIP_TARGET): $(CHIP_OBJ) $(CHIP_VQ_OBJ)
 	$(CC) $(CHIP_OBJ) $(CHIP_VQ_OBJ) -o $(CHIP_TARGET) $(CHIP_LDFLAGS)
 

@@ -102,27 +102,51 @@ static uint32 _main_Release(struct Interface *Self) { return Self->Data.RefCount
  * accepts our backend and proceeds to CreateContext + the draw path.  Per-slot
  * returns are centralized in hw_dispatch() so we can iterate quickly.
  * Reading extra args is harmless on the PPC SysV ABI (regs r4-r6). */
-static uint32 g_identbuf[32];   /* zeroed caps/ident buffer (safe whether the FE
-                                 * reads driverdesc+4/+8 as scalar or pointer) */
 /* B2 iter-2: also log the caller's return address (LR) so each slot call maps to
  * the exact FE code path (registration vs selection vs CreateContext vs a caps
  * probe).  ra - FE_load_base = the fe5327.dis file offset of the call site. */
-static uint32 hw_dispatch(long slot, uint32 a, uint32 b, uint32 c, uint32 ra)
+static uint32 g_dummy_state[16];    /* non-NULL handle ClearDrawRegion returns */
+static uint32 hw_dispatch(long slot, uint32 a, uint32 b, uint32 c, uint32 d, uint32 ra)
 {
     uint32 ret = 0;
+    /* Mirror the working R200 backend's exact slot returns (from Ghidra) so the
+     * caller's CreateContext init sequence accepts us. */
     switch (slot) {
-    case 4:  ret = 1; break;                          /* AllocZBuffer -> success */
-    case 53:                                           /* identify pair (Warp3D_Init */
-    case 57: ret = (uint32)(APTR)g_identbuf; break;   /*  stores at driverdesc+4/+8) */
+    /* The cow checks W3D_AllocZBuffer == W3D_SUCCESS(0) and bails otherwise
+     * (CoW3D6.c:1792); same for CreateContext.  These two MUST return 0.  The
+     * Z read/clear/identify returns are NOT checked-and-bail. */
+    /* slot18 (off 0x94) = backend<->GFXdriver INIT: FE calls it as
+     * slot18(W3DGFXBase, W3DGFXversion).  A real HW driver registers its board
+     * with the GFXdriver here so the GFXdriver's bitmap->driver lookup
+     * (CreateContext primary select via IW3DGFX->[0x58]) maps the app bitmap to
+     * it.  A bare return does NOT register -> GFXdriver has no mapping -> the FE
+     * returns W3D_NODRIVER(-4).  TODO: replicate R200's slot18 GFX handshake.
+     * (return 0 = "HW driver"; ==1 would mark CPU + risk the Warp3D_Init drop.) */
+    case 57: ret = 0x48aa; break;   /* identify -> chip magic (informational)     */
+    case 61: ret = (uint32)(APTR)g_dummy_state; break; /* ClearDrawRegion -> non-NULL */
+    case 4:                         /* AllocZBuffer -> W3D_SUCCESS(0) (cow-checked)*/
+    case 22: case 23: case 42:      /* ReadZPixel/ReadZSpan/SetPenMask -> 0        */
     default: ret = 0; break;
     }
-    DBP("slot %ld ra=%08lx a=%08lx b=%08lx c=%08lx -> %08lx\n",
+    DBP("slot %ld ra=%08lx a=%08lx b=%08lx c=%08lx d=%08lx -> %08lx\n",
         slot, (unsigned long)ra, (unsigned long)a, (unsigned long)b,
-        (unsigned long)c, (unsigned long)ret);
+        (unsigned long)c, (unsigned long)d, (unsigned long)ret);
     return ret;
 }
-#define HWSTUB(n) static uint32 hw_s##n(APTR Self,uint32 a,uint32 b,uint32 c){ (void)Self; return hw_dispatch((n),a,b,c,(uint32)(APTR)__builtin_return_address(0)); }
-HWSTUB(4)  HWSTUB(5)  HWSTUB(6)  HWSTUB(7)  HWSTUB(8)  HWSTUB(9)
+
+/* slot 9 = backend CreateContext(Self, W3D_Context *ctx).  Probe step: log the
+ * ctx + return W3D_SUCCESS(0) to confirm the FE reaches CreateContext and
+ * proceeds.  Next iteration: alloc private state -> ctx->driver (offset 0) like
+ * R200's FUN_00004780.  ctx->driver is left as-is for now. */
+static uint32 hw_s9(APTR Self, APTR ctx)
+{
+    (void)Self;
+    DBP("slot 9 CreateContext ctx=%08lx\n", (unsigned long)ctx);
+    return 0;                              /* W3D_SUCCESS */
+}
+
+#define HWSTUB(n) static uint32 hw_s##n(APTR Self,uint32 a,uint32 b,uint32 c,uint32 d){ (void)Self; return hw_dispatch((n),a,b,c,d,(uint32)(APTR)__builtin_return_address(0)); }
+HWSTUB(4)  HWSTUB(5)  HWSTUB(6)  HWSTUB(7)  HWSTUB(8)
 HWSTUB(10) HWSTUB(11) HWSTUB(12) HWSTUB(13) HWSTUB(14) HWSTUB(15) HWSTUB(16) HWSTUB(17) HWSTUB(18) HWSTUB(19)
 HWSTUB(20) HWSTUB(21) HWSTUB(22) HWSTUB(23) HWSTUB(24) HWSTUB(25) HWSTUB(26) HWSTUB(27) HWSTUB(28) HWSTUB(29)
 HWSTUB(30) HWSTUB(31) HWSTUB(32) HWSTUB(33) HWSTUB(34) HWSTUB(35) HWSTUB(36) HWSTUB(37) HWSTUB(38) HWSTUB(39)

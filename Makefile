@@ -96,7 +96,11 @@ W3DVIO_TARGET  = $(BUILD_DIR)/W3D_VirtIOGPU.library
 W3DVIO_CFLAGS  = -O2 -Wall -I./include -fno-tree-loop-distribute-patterns \
                  -mcrt=newlib -D__NOLIBBASE__ -D__NOGLOBALIFACE__ $(DEPFLAGS)
 W3DVIO_LDFLAGS = -mcrt=newlib -nostartfiles
-W3DVIO_OBJ     = $(BUILD_DIR)/w3d_virtio/w3d_virtio_lib.o
+# B-hw2: the HW backend now compiles in the proven virgl render core
+# (warp3d_main.c) + the chip-free virgl encoder (chip_virgl.c -DVIRGL_ENCODE_ONLY).
+W3DVIO_OBJ     = $(BUILD_DIR)/w3d_virtio/w3d_virtio_lib.o \
+                 $(BUILD_DIR)/w3d_virtio/warp3d_main.o \
+                 $(BUILD_DIR)/w3d_virtio/virgl_encode.o
 
 DEP = $(CHIP_OBJ:.o=.d) $(CHIP_VQ_OBJ:.o=.d) $(MGL_OBJ:.o=.d) $(W3D_OBJ:.o=.d) $(W3DVIO_OBJ:.o=.d)
 
@@ -110,6 +114,15 @@ $(W3DVIO_TARGET): $(W3DVIO_OBJ)
 $(BUILD_DIR)/w3d_virtio/%.o: src/w3d_virtio/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(W3DVIO_CFLAGS) -c $< -o $@
+
+# render core + chip-free virgl encoder, compiled into the HW backend
+$(BUILD_DIR)/w3d_virtio/warp3d_main.o: src/warp3d/warp3d_main.c
+	@mkdir -p $(dir $@)
+	$(CC) $(W3DVIO_CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/w3d_virtio/virgl_encode.o: src/chip/chip_virgl.c
+	@mkdir -p $(dir $@)
+	$(CC) $(W3DVIO_CFLAGS) -DVIRGL_ENCODE_ONLY -c $< -o $@
 
 # W3D_VirtIO.library -- Warp3D GFX DRIVER (Phase 8 B-gfx1), loaded from
 # LIBS:Warp3D/GFXdrivers/.  Same flags as the HW backend.  B-gfx1 = probe.

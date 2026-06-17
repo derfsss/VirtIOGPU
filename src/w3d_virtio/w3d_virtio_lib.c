@@ -30,12 +30,67 @@
 #include <exec/interfaces.h>
 #include <exec/resident.h>
 #include <exec/nodes.h>
+#include <exec/memory.h>
 #include <dos/dos.h>
 #include <utility/tagitem.h>
 #include <proto/exec.h>
 
-/* ---- globals ---- */
-struct ExecIFace *IExec = NULL;
+/* The proven virgl render core (src/warp3d/warp3d_main.c) is compiled into this
+ * backend; warp3d_internal.h gives us W3D_Context, struct W3DVirgl and the
+ * w3d_* op prototypes.  The render fns ignore Self and key off ctx->driver. */
+#include "../warp3d/warp3d_internal.h"
+
+/* ---- globals (the render core's externs; IExec captured in _w3d_Init) ---- */
+struct ExecIFace *IExec      = NULL;
+struct Library   *g_chipBase = NULL;
+struct V3DIFace  *g_IV3D     = NULL;
+
+/* ----------------------------------------------------------------------- */
+/* Backend lifecycle wrappers around the proven render core.               */
+/* In the FE-backend model the FE ALLOCATES the W3D_Context and calls       */
+/* CreateContext(Self, ctx); we must populate ctx->driver, not allocate ctx.*/
+/* ----------------------------------------------------------------------- */
+/* hw_CreateContext: reuse the proven w3d_CreateContext (which allocs its own
+ * ctx + W3DVirgl from the W3D_CC_BITMAP), then TRANSFER the driver state onto
+ * the FE-allocated ctx and free only the inner shell. */
+static uint32 hw_CreateContext(APTR Self, W3D_Context *ctx)
+{
+    uint32 err = 0;
+    W3D_Context *inner;
+    (void)Self;
+    if (!ctx) return (uint32)W3D_ILLEGALINPUT;
+    inner = w3d_CreateContextTags((struct Warp3DIFace *)0, &err,
+                W3D_CC_BITMAP, (uint32)(APTR)ctx->drawregion, TAG_DONE);
+    if (!inner || !inner->driver) {
+        if (IExec) IExec->DebugPrintF("[W3D_VirtIOGPU] hw_CreateContext FAIL err=%ld\n", (long)err);
+        if (inner) IExec->FreeVec(inner);
+        return err ? err : (uint32)W3D_NODRIVER;
+    }
+    ctx->driver     = inner->driver;        /* the W3DVirgl private state    */
+    ctx->drivertype = inner->drivertype;
+    ctx->width      = inner->width;
+    ctx->height     = inner->height;
+    inner->driver   = 0;                    /* keep wv; free only the shell  */
+    IExec->FreeVec(inner);
+    if (IExec) IExec->DebugPrintF("[W3D_VirtIOGPU] hw_CreateContext OK driver=%08lx %ldx%ld\n",
+        (unsigned long)(APTR)ctx->driver, (long)ctx->width, (long)ctx->height);
+    return 0;                               /* W3D_SUCCESS */
+}
+
+/* hw_DestroyContext: w3d_DestroyContext frees the W3DVirgl resources AND the
+ * ctx; the FE owns our ctx, so hand the cleanup a throwaway shell carrying wv. */
+static void hw_DestroyContext(APTR Self, W3D_Context *ctx)
+{
+    W3D_Context *shell;
+    (void)Self;
+    if (!ctx || !ctx->driver) return;
+    shell = IExec->AllocVecTags(sizeof(W3D_Context),
+                AVT_Type, MEMF_PRIVATE, AVT_ClearWithValue, 0, TAG_DONE);
+    if (!shell) return;
+    shell->driver = ctx->driver;
+    ctx->driver   = 0;
+    w3d_DestroyContext((struct Warp3DIFace *)0, shell);   /* frees wv + shell */
+}
 
 /* Filename-matched name: the FE scans libs:Warp3D/HWdrivers/#?.library and opens
  * by filename, so the romtag name MUST case-match the on-disk file name. */
@@ -131,8 +186,9 @@ static uint32 hw_dispatch(long slot, uint32 a, uint32 b, uint32 c, uint32 d, uin
      * actually hammers (format ids 0x6f-0x72,0x14-0x17 + destfmt); the loop
      * needs == 5 to treat the format as supported (else -18 UNSUPPORTEDFMT). */
     case 23: ret = 5;      break;
+    case 5:  ret = 1;      break;   /* CheckIdle -> idle/ready (cow polls it)      */
     case 57: ret = 0x48aa; break;   /* identify -> chip magic (informational)     */
-    case 61: ret = (uint32)(APTR)g_dummy_state; break; /* ClearDrawRegion -> non-NULL */
+    case 61: ret = (uint32)(APTR)g_dummy_state; break; /* ClearDrawRegion (unused: vtable wires real) */
     case 4:                         /* AllocZBuffer -> W3D_SUCCESS(0) (cow-checked)*/
     case 22: case 42:               /* ReadZPixel/SetPenMask -> 0                  */
     default: ret = 0; break;
@@ -143,19 +199,12 @@ static uint32 hw_dispatch(long slot, uint32 a, uint32 b, uint32 c, uint32 d, uin
     return ret;
 }
 
-/* slot 9 = backend CreateContext(Self, W3D_Context *ctx).  Probe step: log the
- * ctx + return W3D_SUCCESS(0) to confirm the FE reaches CreateContext and
- * proceeds.  Next iteration: alloc private state -> ctx->driver (offset 0) like
- * R200's FUN_00004780.  ctx->driver is left as-is for now. */
-static uint32 hw_s9(APTR Self, APTR ctx)
-{
-    (void)Self;
-    DBP("slot 9 CreateContext ctx=%08lx\n", (unsigned long)ctx);
-    return 0;                              /* W3D_SUCCESS */
-}
-
+/* slot 9 (CreateContext) + slot 24 (DestroyContext) are the real wrappers
+ * hw_CreateContext/hw_DestroyContext defined above.  Remaining op slots are
+ * per-vector probe/tuned stubs via hw_dispatch; the geometry/lifecycle slots
+ * are wired to the proven w3d_* render core in the vtable below. */
 #define HWSTUB(n) static uint32 hw_s##n(APTR Self,uint32 a,uint32 b,uint32 c,uint32 d){ (void)Self; return hw_dispatch((n),a,b,c,d,(uint32)(APTR)__builtin_return_address(0)); }
-HWSTUB(4)  HWSTUB(5)  HWSTUB(6)  HWSTUB(7)  HWSTUB(8)
+HWSTUB(4)  HWSTUB(5)  HWSTUB(6)  HWSTUB(7)  HWSTUB(8)  HWSTUB(9)
 HWSTUB(10) HWSTUB(11) HWSTUB(12) HWSTUB(13) HWSTUB(14) HWSTUB(15) HWSTUB(16) HWSTUB(17) HWSTUB(18) HWSTUB(19)
 HWSTUB(20) HWSTUB(21) HWSTUB(22) HWSTUB(23) HWSTUB(24) HWSTUB(25) HWSTUB(26) HWSTUB(27) HWSTUB(28) HWSTUB(29)
 HWSTUB(30) HWSTUB(31) HWSTUB(32) HWSTUB(33) HWSTUB(34) HWSTUB(35) HWSTUB(36) HWSTUB(37) HWSTUB(38) HWSTUB(39)
@@ -171,18 +220,43 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)_main_Release,  /* slot 1  Release */
     NULL,                 /* slot 2  Expunge */
     NULL,                 /* slot 3  Clone   */
-    (APTR)hw_s4,  (APTR)hw_s5,  (APTR)hw_s6,  (APTR)hw_s7,  (APTR)hw_s8,  (APTR)hw_s9,
-    (APTR)hw_s10, (APTR)hw_s11, (APTR)hw_s12, (APTR)hw_s13, (APTR)hw_s14, (APTR)hw_s15,
-    (APTR)hw_s16, (APTR)hw_s17, (APTR)hw_s18, (APTR)hw_s19, (APTR)hw_s20, (APTR)hw_s21,
-    (APTR)hw_s22, (APTR)hw_s23, (APTR)hw_s24, (APTR)hw_s25, (APTR)hw_s26, (APTR)hw_s27,
-    (APTR)hw_s28, (APTR)hw_s29, (APTR)hw_s30, (APTR)hw_s31, (APTR)hw_s32, (APTR)hw_s33,
-    (APTR)hw_s34, (APTR)hw_s35, (APTR)hw_s36, (APTR)hw_s37, (APTR)hw_s38, (APTR)hw_s39,
+    /* slots 4..87.  Geometry/lifecycle slots wired to the proven w3d_* render
+     * core; the rest stay probe/tuned stubs (hw_sN).  Slot->op from
+     * tmp_re/fe5327_map2.txt (backend off = 76 + slot*4). */
+    (APTR)w3d_AllocZBuffer, /* 4  AllocZBuffer  */
+    (APTR)hw_s5,            /* 5  CheckIdle->1  */
+    (APTR)hw_s6,            /* 6  ClearStencilBuffer */
+    (APTR)w3d_ClearBuffers, /* 7  ClearBuffers  */
+    (APTR)hw_s8,            /* 8  */
+    (APTR)hw_CreateContext, /* 9  CreateContext */
+    (APTR)hw_s10, (APTR)hw_s11, (APTR)hw_s12,
+    (APTR)w3d_DrawTriangle, /* 13 DrawTriangle  */
+    (APTR)hw_s14, (APTR)hw_s15, (APTR)hw_s16, (APTR)hw_s17, (APTR)hw_s18,
+    (APTR)hw_s19,           /* 19 SetState/Query/format-query -> 5 (keep) */
+    (APTR)hw_s20, (APTR)hw_s21, (APTR)hw_s22,
+    (APTR)hw_s23,           /* 23 format-query -> 5 (keep) */
+    (APTR)hw_DestroyContext,/* 24 DestroyContext */
+    (APTR)w3d_SetBlendMode, /* 25 SetBlendMode  */
+    (APTR)hw_s26, (APTR)hw_s27, (APTR)hw_s28, (APTR)hw_s29,
+    (APTR)hw_s30, (APTR)hw_s31, (APTR)hw_s32, (APTR)hw_s33, (APTR)hw_s34, (APTR)hw_s35,
+    (APTR)hw_s36, (APTR)hw_s37, (APTR)hw_s38, (APTR)hw_s39,
     (APTR)hw_s40, (APTR)hw_s41, (APTR)hw_s42, (APTR)hw_s43, (APTR)hw_s44, (APTR)hw_s45,
     (APTR)hw_s46, (APTR)hw_s47, (APTR)hw_s48, (APTR)hw_s49, (APTR)hw_s50, (APTR)hw_s51,
-    (APTR)hw_s52, (APTR)hw_s53, (APTR)hw_s54, (APTR)hw_s55, (APTR)hw_s56, (APTR)hw_s57,
-    (APTR)hw_s58, (APTR)hw_s59, (APTR)hw_s60, (APTR)hw_s61, (APTR)hw_s62, (APTR)hw_s63,
-    (APTR)hw_s64, (APTR)hw_s65, (APTR)hw_s66, (APTR)hw_s67, (APTR)hw_s68, (APTR)hw_s69,
-    (APTR)hw_s70, (APTR)hw_s71, (APTR)hw_s72, (APTR)hw_s73, (APTR)hw_s74, (APTR)hw_s75,
+    (APTR)hw_s52, (APTR)hw_s53, (APTR)hw_s54, (APTR)hw_s55, (APTR)hw_s56,
+    (APTR)hw_s57,           /* 57 identify -> 0x48aa (keep) */
+    (APTR)w3d_FlushFrame,   /* 58 FlushFrame    */
+    (APTR)hw_s59, (APTR)hw_s60,
+    (APTR)w3d_ClearDrawRegion, /* 61 ClearDrawRegion */
+    (APTR)hw_s62, (APTR)hw_s63, (APTR)hw_s64,
+    (APTR)w3d_VertexPointer,/* 65 VertexPointer */
+    (APTR)hw_s66,           /* 66 TexCoordPointer (stub: textures lag) */
+    (APTR)w3d_ColorPointer, /* 67 ColorPointer  */
+    (APTR)w3d_DrawArray,    /* 68 DrawArray     */
+    (APTR)w3d_DrawElements, /* 69 DrawElements  */
+    (APTR)hw_s70,
+    (APTR)w3d_BindTexture,  /* 71 BindTexture   */
+    (APTR)hw_s72, (APTR)hw_s73, (APTR)hw_s74,
+    (APTR)w3d_InterleavedArray, /* 75 InterleavedArray */
     (APTR)hw_s76, (APTR)hw_s77, (APTR)hw_s78, (APTR)hw_s79, (APTR)hw_s80, (APTR)hw_s81,
     (APTR)hw_s82, (APTR)hw_s83, (APTR)hw_s84, (APTR)hw_s85, (APTR)hw_s86, (APTR)hw_s87,
     (APTR)-1              /* sentinel */

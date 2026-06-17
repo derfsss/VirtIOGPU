@@ -681,10 +681,15 @@ void chip_flush_all(void)
         }
 
         HOT_STAGE(gs, "flush_all:sb:obtain_lock");
+        /* io_lock protects ONLY the board_mem->fb_mem conversion (vs chip_flush
+         * direct draws in single-buffer mode).  The present ops below now route
+         * through the gpu_srv (which itself takes io_lock), so we MUST release
+         * before calling them -- holding io_lock across a server-routed call
+         * deadlocks (caller waits for the server; server waits for io_lock). */
         IExec->MutexObtain(gs->io_lock);
         HOT_STAGE(gs, "flush_all:sb:convert");
-
         chip_convert_rect(gs, gs->fb_mem, rx, ry, rw, rh);
+        IExec->MutexRelease(gs->io_lock);
 
         uint64 t_off = (uint64)((uint32)ry * gs->fb_stride + (uint32)rx * 4);
         BOOL t_ok;
@@ -709,8 +714,6 @@ void chip_flush_all(void)
             chip_ResourceFlush(gs, flush_res, rx, ry, rw, rh);
         }
 
-        HOT_STAGE(gs, "flush_all:sb:release_lock");
-        IExec->MutexRelease(gs->io_lock);
         HOT_STAGE(gs, "flush_all:sb:done");
         chip_prof_end(gs, &prof_flush_all, prof_t0, (uint32)rw * rh * 4);
         return;
@@ -763,10 +766,10 @@ void chip_flush_all(void)
 
     HOT_STAGE(gs, "flush_all:db:convert");
     chip_convert_rect(gs, back_mem, 0, 0, w, h);
-    HOT_STAGE(gs, "flush_all:db:obtain_lock");
-    IExec->MutexObtain(gs->io_lock);
     HOT_STAGE(gs, "flush_all:db:transfer");
 
+    /* Present ops route through the gpu_srv -- do NOT hold io_lock across them
+     * (the server takes io_lock; holding it here would deadlock). */
     BOOL t_ok;
     if (use_virgl) {
         struct virtio_gpu_box box;
@@ -784,10 +787,7 @@ void chip_flush_all(void)
         t_ok = chip_TransferToHost2D(gs, back_2d_res, 0, 0, w, h, 0ULL);
     }
 
-    if (!t_ok) {
-        IExec->MutexRelease(gs->io_lock);
-        return;
-    }
+    if (!t_ok) return;
 
     uint32 back_res = use_virgl ? back_3d_res : back_2d_res;
     HOT_STAGE(gs, "flush_all:db:scanout");
@@ -796,9 +796,10 @@ void chip_flush_all(void)
     chip_ResourceFlush(gs, back_res, 0, 0, w, h);
     HOT_STAGE(gs, "flush_all:db:swap");
 
-    /* Phase 3: Swap front <-> back pointers.
-     * After this, primary fields (fb_mem, resource_id, etc.) = new front. */
+    /* Phase 3: Swap front <-> back pointers (brief lock; no server call). */
+    IExec->MutexObtain(gs->io_lock);
     chip_swap_buffers(gs);
+    IExec->MutexRelease(gs->io_lock);
 
     db_swap_count++;
     /* Swap logging: only the first ~10 messages (every 200 swaps, for the

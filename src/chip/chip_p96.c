@@ -199,13 +199,8 @@ static BOOL chip_SetSwitch(struct BoardInfo *bi, BOOL enabled)
             } else {
                 DCHIP("WARNING: dos flush process creation failed");
             }
-            /* Phase 8: launch the GPU control-queue I/O server now that dos is
-             * confirmed up (it needs CreateNewProcTags).  Clients route their
-             * GPU ops through it instead of holding io_lock across the wait. */
-            if (chip_gpu_srv_start(gs))
-                DCHIP("gpu_srv: I/O server launched");
-            else
-                DCHIP("gpu_srv: launch failed -- legacy io_lock path in use");
+            /* Phase 8 gpu_srv: DISABLED pending the full io_lock refactor
+             * (see the note at the primary flush-task creation path). */
         } else {
             DCHIP("WARNING: dos.library still not available for flush task");
         }
@@ -626,9 +621,14 @@ static BOOL chip_SetDisplay(struct BoardInfo *bi, BOOL enabled)
             DCHIP("WARNING: CreateTaskTags failed for flush task "
                   "(will retry via dos.library in SetSwitch)");
         }
-        /* Phase 8: launch the GPU control-queue I/O server (idempotent). */
-        if (chip_gpu_srv_start(gs))
-            DCHIP("gpu_srv: I/O server launched");
+        /* Phase 8: gpu_srv I/O server -- DISABLED pending the full refactor.
+         * Rerouting control-queue ops to the server deadlocks every caller that
+         * already holds io_lock around them (flush_all -- fixed; but also the
+         * CompositeTags hook chip_virgl_composite/chip_vram_composite, the
+         * resize/perf/zero-copy paths).  Until ALL those release io_lock before
+         * the server-routed call, leave the server OFF so chip_*_srv_do sees
+         * gpu_srv_port==NULL and every path uses the stable legacy io_lock route.
+         * if (chip_gpu_srv_start(gs)) DCHIP("gpu_srv: I/O server launched"); */
     }
 
     if (enabled) chip_flush_signal_activity(gs);

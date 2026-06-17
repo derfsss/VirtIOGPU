@@ -7,6 +7,7 @@
  */
 
 #include "chip/chip_state.h"
+#include "chip/gpu_srv.h"
 
 /* -----------------------------------------------------------------------
  * chip_do_io -- synchronous VirtIO control queue transaction.
@@ -348,25 +349,35 @@ BOOL chip_SetScanout(struct ChipGPUState *gs,
 
     /* SET_SCANOUT can timeout during mode switches when QEMU's main loop is
      * busy (e.g. processing SDL resize events).  Retry up to 3 times with a
-     * brief busy-wait between attempts to let QEMU catch up. */
+     * brief busy-wait between attempts to let QEMU catch up.  Present path ->
+     * route through the gpu_srv at PRESENT priority (built once, sent each try). */
+    struct virtio_gpu_set_scanout cmd;
+    struct virtio_gpu_ctrl_hdr resp;
+    chip_zero(&cmd, sizeof(cmd));
+    cmd.hdr.type    = GP32(VIRTIO_GPU_CMD_SET_SCANOUT);
+    cmd.r.x         = GP32(x);
+    cmd.r.y         = GP32(y);
+    cmd.r.width     = GP32(width);
+    cmd.r.height    = GP32(height);
+    cmd.scanout_id  = GP32(scanout_id);
+    cmd.resource_id = GP32(resource_id);
+
     for (uint32 attempt = 0; attempt < 3; attempt++) {
-        IExec->MutexObtain(gs->io_lock);
-
-        struct virtio_gpu_set_scanout *cmd =
-            (struct virtio_gpu_set_scanout *)gs->cmd_buf;
-        chip_zero(gs->cmd_buf,  sizeof(*cmd));
-        chip_zero(gs->resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
-
-        cmd->hdr.type    = GP32(VIRTIO_GPU_CMD_SET_SCANOUT);
-        cmd->r.x         = GP32(x);
-        cmd->r.y         = GP32(y);
-        cmd->r.width     = GP32(width);
-        cmd->r.height    = GP32(height);
-        cmd->scanout_id  = GP32(scanout_id);
-        cmd->resource_id = GP32(resource_id);
-
-        uint32 rt = chip_gpu_send(gs, sizeof(*cmd), sizeof(struct virtio_gpu_ctrl_hdr));
-        IExec->MutexRelease(gs->io_lock);
+        uint32 rt;
+        if (gs->gpu_srv_port) {
+            chip_zero(&resp, sizeof(resp));
+            rt = chip_srv_send2(gs, GPUREQ_PRI_PRESENT, &cmd, sizeof(cmd),
+                                &resp, sizeof(resp));
+        } else {
+            volatile uint8 *d = (volatile uint8 *)gs->cmd_buf;
+            const uint8 *s = (const uint8 *)&cmd;
+            uint32 i;
+            IExec->MutexObtain(gs->io_lock);
+            for (i = 0; i < sizeof(cmd); i++) d[i] = s[i];
+            chip_zero(gs->resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
+            rt = chip_gpu_send(gs, sizeof(cmd), sizeof(struct virtio_gpu_ctrl_hdr));
+            IExec->MutexRelease(gs->io_lock);
+        }
 
         if (rt == VIRTIO_GPU_RESP_OK_NODATA) {
             DCHIP_V("SET_SCANOUT scanout=%lu res=%lu OK", scanout_id, resource_id);
@@ -404,23 +415,33 @@ BOOL chip_TransferToHost2D(struct ChipGPUState *gs,
     }
 
     struct ExecIFace *IExec = gs->IExec;
-    IExec->MutexObtain(gs->io_lock);
+    struct virtio_gpu_transfer_to_host_2d cmd;
+    struct virtio_gpu_ctrl_hdr resp;
+    uint32 rt;
 
-    struct virtio_gpu_transfer_to_host_2d *cmd =
-        (struct virtio_gpu_transfer_to_host_2d *)gs->cmd_buf;
-    chip_zero(gs->cmd_buf,  sizeof(*cmd));
-    chip_zero(gs->resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
+    chip_zero(&cmd, sizeof(cmd));
+    cmd.hdr.type    = GP32(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
+    cmd.r.x         = GP32(x);
+    cmd.r.y         = GP32(y);
+    cmd.r.width     = GP32(width);
+    cmd.r.height    = GP32(height);
+    cmd.offset      = GP64(offset);
+    cmd.resource_id = GP32(resource_id);
 
-    cmd->hdr.type    = GP32(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
-    cmd->r.x         = GP32(x);
-    cmd->r.y         = GP32(y);
-    cmd->r.width     = GP32(width);
-    cmd->r.height    = GP32(height);
-    cmd->offset      = GP64(offset);
-    cmd->resource_id = GP32(resource_id);
-
-    uint32 rt = chip_gpu_send(gs, sizeof(*cmd), sizeof(struct virtio_gpu_ctrl_hdr));
-    IExec->MutexRelease(gs->io_lock);
+    if (gs->gpu_srv_port) {
+        chip_zero(&resp, sizeof(resp));
+        rt = chip_srv_send2(gs, GPUREQ_PRI_PRESENT, &cmd, sizeof(cmd),
+                            &resp, sizeof(resp));
+    } else {
+        volatile uint8 *d = (volatile uint8 *)gs->cmd_buf;
+        const uint8 *s = (const uint8 *)&cmd;
+        uint32 i;
+        IExec->MutexObtain(gs->io_lock);
+        for (i = 0; i < sizeof(cmd); i++) d[i] = s[i];
+        chip_zero(gs->resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
+        rt = chip_gpu_send(gs, sizeof(cmd), sizeof(struct virtio_gpu_ctrl_hdr));
+        IExec->MutexRelease(gs->io_lock);
+    }
 
     if (rt != VIRTIO_GPU_RESP_OK_NODATA) {
         DCHIP("TransferToHost2D failed: resp=0x%lx res=%lu rect=(%lu,%lu %lux%lu)",
@@ -585,22 +606,32 @@ BOOL chip_ResourceFlush(struct ChipGPUState *gs,
                           uint32 width, uint32 height)
 {
     struct ExecIFace *IExec = gs->IExec;
-    IExec->MutexObtain(gs->io_lock);
+    struct virtio_gpu_resource_flush cmd;
+    struct virtio_gpu_ctrl_hdr resp;
+    uint32 rt;
 
-    struct virtio_gpu_resource_flush *cmd =
-        (struct virtio_gpu_resource_flush *)gs->cmd_buf;
-    chip_zero(gs->cmd_buf,  sizeof(*cmd));
-    chip_zero(gs->resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
+    chip_zero(&cmd, sizeof(cmd));
+    cmd.hdr.type    = GP32(VIRTIO_GPU_CMD_RESOURCE_FLUSH);
+    cmd.r.x         = GP32(x);
+    cmd.r.y         = GP32(y);
+    cmd.r.width     = GP32(width);
+    cmd.r.height    = GP32(height);
+    cmd.resource_id = GP32(resource_id);
 
-    cmd->hdr.type    = GP32(VIRTIO_GPU_CMD_RESOURCE_FLUSH);
-    cmd->r.x         = GP32(x);
-    cmd->r.y         = GP32(y);
-    cmd->r.width     = GP32(width);
-    cmd->r.height    = GP32(height);
-    cmd->resource_id = GP32(resource_id);
-
-    uint32 rt = chip_gpu_send(gs, sizeof(*cmd), sizeof(struct virtio_gpu_ctrl_hdr));
-    IExec->MutexRelease(gs->io_lock);
+    if (gs->gpu_srv_port) {
+        chip_zero(&resp, sizeof(resp));
+        rt = chip_srv_send2(gs, GPUREQ_PRI_PRESENT, &cmd, sizeof(cmd),
+                            &resp, sizeof(resp));
+    } else {
+        volatile uint8 *d = (volatile uint8 *)gs->cmd_buf;
+        const uint8 *s = (const uint8 *)&cmd;
+        uint32 i;
+        IExec->MutexObtain(gs->io_lock);
+        for (i = 0; i < sizeof(cmd); i++) d[i] = s[i];
+        chip_zero(gs->resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
+        rt = chip_gpu_send(gs, sizeof(cmd), sizeof(struct virtio_gpu_ctrl_hdr));
+        IExec->MutexRelease(gs->io_lock);
+    }
 
     if (rt != VIRTIO_GPU_RESP_OK_NODATA) {
         DCHIP("ResourceFlush failed: resp=0x%lx res=%lu rect=(%lu,%lu %lux%lu)",

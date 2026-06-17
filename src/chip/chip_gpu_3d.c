@@ -373,30 +373,41 @@ BOOL chip_TransferToHost3D(struct ChipGPUState *gs, uint32 ctx_id,
                              uint64 offset, struct virtio_gpu_box *box)
 {
     struct ExecIFace *IExec = gs->IExec;
-    IExec->MutexObtain(gs->io_lock);
+    struct virtio_gpu_transfer_host_3d cmd;
+    struct virtio_gpu_ctrl_hdr resp;
+    uint32 rt;
 
-    struct virtio_gpu_transfer_host_3d *cmd =
-        (struct virtio_gpu_transfer_host_3d *)gs->cmd_buf;
-    chip_zero(gs->cmd_buf,  sizeof(*cmd));
-    chip_zero(gs->resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
+    chip_zero(&cmd, sizeof(cmd));
+    cmd.hdr.type     = GP32(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D);
+    cmd.hdr.ctx_id   = GP32(ctx_id);
+    cmd.resource_id  = GP32(resource_id);
+    cmd.level        = GP32(level);
+    cmd.stride       = GP32(stride);
+    cmd.layer_stride = GP32(layer_stride);
+    cmd.offset       = GP64(offset);
+    cmd.box.x        = GP32(box->x);
+    cmd.box.y        = GP32(box->y);
+    cmd.box.z        = GP32(box->z);
+    cmd.box.w        = GP32(box->w);
+    cmd.box.h        = GP32(box->h);
+    cmd.box.d        = GP32(box->d);
 
-    cmd->hdr.type    = GP32(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D);
-    cmd->hdr.ctx_id  = GP32(ctx_id);
-    cmd->resource_id = GP32(resource_id);
-    cmd->level       = GP32(level);
-    cmd->stride      = GP32(stride);
-    cmd->layer_stride = GP32(layer_stride);
-    cmd->offset      = GP64(offset);
-    cmd->box.x       = GP32(box->x);
-    cmd->box.y       = GP32(box->y);
-    cmd->box.z       = GP32(box->z);
-    cmd->box.w       = GP32(box->w);
-    cmd->box.h       = GP32(box->h);
-    cmd->box.d       = GP32(box->d);
-
-    uint32 rt = chip_gpu_send(gs,
-        sizeof(*cmd), sizeof(struct virtio_gpu_ctrl_hdr));
-    IExec->MutexRelease(gs->io_lock);
+    /* Desktop present path -> route through the server at PRESENT priority so it
+     * is serviced alongside (not starved by) the cow's draws. */
+    if (gs->gpu_srv_port) {
+        chip_zero(&resp, sizeof(resp));
+        rt = chip_srv_send2(gs, GPUREQ_PRI_PRESENT, &cmd, sizeof(cmd),
+                            &resp, sizeof(resp));
+    } else {
+        volatile uint8 *d = (volatile uint8 *)gs->cmd_buf;
+        const uint8 *s = (const uint8 *)&cmd;
+        uint32 i;
+        IExec->MutexObtain(gs->io_lock);
+        for (i = 0; i < sizeof(cmd); i++) d[i] = s[i];
+        chip_zero(gs->resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
+        rt = chip_gpu_send(gs, sizeof(cmd), sizeof(struct virtio_gpu_ctrl_hdr));
+        IExec->MutexRelease(gs->io_lock);
+    }
 
     if (rt != VIRTIO_GPU_RESP_OK_NODATA) {
         DCHIP("TRANSFER_TO_HOST_3D res=%lu failed, resp=0x%lx", resource_id, rt);

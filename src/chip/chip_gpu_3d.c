@@ -11,6 +11,7 @@
  */
 
 #include "chip/chip_state.h"
+#include "chip/gpu_srv.h"
 
 /* The 2-SG control-queue transaction helpers (chip_do_io / chip_gpu_send)
  * live in chip_gpu_cmds.c and are shared with this file via prototypes
@@ -413,30 +414,39 @@ BOOL chip_TransferFromHost3D(struct ChipGPUState *gs, uint32 ctx_id,
                                uint64 offset, struct virtio_gpu_box *box)
 {
     struct ExecIFace *IExec = gs->IExec;
-    IExec->MutexObtain(gs->io_lock);
+    struct virtio_gpu_transfer_host_3d cmd;     /* built in local memory */
+    struct virtio_gpu_ctrl_hdr resp;
+    uint32 rt;
 
-    struct virtio_gpu_transfer_host_3d *cmd =
-        (struct virtio_gpu_transfer_host_3d *)gs->cmd_buf;
-    chip_zero(gs->cmd_buf,  sizeof(*cmd));
-    chip_zero(gs->resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
+    chip_zero(&cmd, sizeof(cmd));
+    cmd.hdr.type     = GP32(VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D);
+    cmd.hdr.ctx_id   = GP32(ctx_id);
+    cmd.resource_id  = GP32(resource_id);
+    cmd.level        = GP32(level);
+    cmd.stride       = GP32(stride);
+    cmd.layer_stride = GP32(layer_stride);
+    cmd.offset       = GP64(offset);
+    cmd.box.x        = GP32(box->x);
+    cmd.box.y        = GP32(box->y);
+    cmd.box.z        = GP32(box->z);
+    cmd.box.w        = GP32(box->w);
+    cmd.box.h        = GP32(box->h);
+    cmd.box.d        = GP32(box->d);
 
-    cmd->hdr.type    = GP32(VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D);
-    cmd->hdr.ctx_id  = GP32(ctx_id);
-    cmd->resource_id = GP32(resource_id);
-    cmd->level       = GP32(level);
-    cmd->stride      = GP32(stride);
-    cmd->layer_stride = GP32(layer_stride);
-    cmd->offset      = GP64(offset);
-    cmd->box.x       = GP32(box->x);
-    cmd->box.y       = GP32(box->y);
-    cmd->box.z       = GP32(box->z);
-    cmd->box.w       = GP32(box->w);
-    cmd->box.h       = GP32(box->h);
-    cmd->box.d       = GP32(box->d);
-
-    uint32 rt = chip_gpu_send(gs,
-        sizeof(*cmd), sizeof(struct virtio_gpu_ctrl_hdr));
-    IExec->MutexRelease(gs->io_lock);
+    if (gs->gpu_srv_port) {
+        chip_zero(&resp, sizeof(resp));
+        rt = chip_srv_send2(gs, GPUREQ_PRI_NORMAL, &cmd, sizeof(cmd),
+                            &resp, sizeof(resp));
+    } else {
+        volatile uint8 *d = (volatile uint8 *)gs->cmd_buf;
+        const uint8 *s = (const uint8 *)&cmd;
+        uint32 i;
+        IExec->MutexObtain(gs->io_lock);
+        for (i = 0; i < sizeof(cmd); i++) d[i] = s[i];
+        chip_zero(gs->resp_buf, sizeof(struct virtio_gpu_ctrl_hdr));
+        rt = chip_gpu_send(gs, sizeof(cmd), sizeof(struct virtio_gpu_ctrl_hdr));
+        IExec->MutexRelease(gs->io_lock);
+    }
 
     if (rt != VIRTIO_GPU_RESP_OK_NODATA) {
         DCHIP("TRANSFER_FROM_HOST_3D res=%lu failed, resp=0x%lx", resource_id, rt);
@@ -468,6 +478,28 @@ BOOL chip_Submit3D(struct ChipGPUState *gs, uint32 ctx_id,
     if (cmd_size > 64 * 1024) {
         DCHIP("SUBMIT_3D: cmd_size %lu exceeds 64K buffer", cmd_size);
         return FALSE;
+    }
+
+    /* Fast path: route through the gpu_srv I/O server -- the calling task does
+     * NOT hold io_lock across the GPU round-trip, so the cow's per-frame draws
+     * no longer starve the (higher-priority) desktop/cursor present.  Falls back
+     * to the legacy direct path until the server is up. */
+    if (gs->gpu_srv_port) {
+        struct virtio_gpu_cmd_submit hdr;
+        struct virtio_gpu_ctrl_hdr   resp;
+        chip_zero(&hdr, sizeof(hdr));
+        hdr.hdr.type   = GP32(VIRTIO_GPU_CMD_SUBMIT_3D);
+        hdr.hdr.ctx_id = GP32(ctx_id);
+        hdr.size       = GP32(cmd_size);
+        chip_zero(&resp, sizeof(resp));
+        chip_srv_submit3d(gs, GPUREQ_PRI_DRAW, &hdr, sizeof(hdr),
+                          cmd_data, cmd_size, &resp, sizeof(resp));
+        if (GP32(resp.type) != VIRTIO_GPU_RESP_OK_NODATA) {
+            DCHIP("SUBMIT_3D(srv) ctx=%lu size=%lu failed, resp=0x%lx",
+                  ctx_id, cmd_size, (unsigned long)GP32(resp.type));
+            return FALSE;
+        }
+        return TRUE;
     }
 
     IExec->MutexObtain(gs->io_lock);

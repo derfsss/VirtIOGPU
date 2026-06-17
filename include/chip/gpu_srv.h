@@ -36,19 +36,22 @@ struct ChipGPUState;
 #define GPUREQ_PRI_NORMAL     0   /* misc control commands             */
 #define GPUREQ_PRI_DRAW     (-10) /* bulk warp3d draws (SUBMIT_3D)     */
 
-/* A single control-queue transaction.  The caller owns all buffers referenced
- * by the *_phys fields (per-context or per-call) -- the server never touches a
- * shared global cmd_buf/resp_buf, so two clients never clobber each other. */
+/* A single control-queue transaction (COPY model).  The caller passes its
+ * command in its OWN memory (stack/context buffers); the server copies it into
+ * the server-owned DMA cmd/cmd3d buffers, submits, and copies the response back
+ * into the caller's resp buffer.  So callers never touch the shared DMA buffers
+ * and never hold io_lock across the GPU wait -- they block only on their reply
+ * port.  The server (sole hot io_lock holder) prioritises present/cursor over
+ * bulk draws (msg.mn_Node.ln_Pri). */
 struct GpuReq {
     struct Message msg;        /* mn_ReplyPort = caller's reply port;
                                 * mn_Node.ln_Pri = GPUREQ_PRI_*               */
     uint16  op;                /* GPUREQ_2SG / _3SG / _QUIT                    */
     uint16  flags;             /* GPUREQF_*                                    */
-    uint32  hdr_phys,  hdr_size;   /* OUT (cmd header)                         */
-    uint32  data_phys, data_size;  /* OUT 2nd entry (3SG only; 0 otherwise)    */
-    uint32  resp_phys, resp_size;  /* IN  (response; 0 = none wanted)          */
-    uint32  result;            /* bytes written into resp (server-filled);
-                                * 0 = timeout/error                            */
+    const void *cmd;   uint32 cmd_size;   /* OUT header (-> DMA cmd_buf)       */
+    const void *data;  uint32 data_size;  /* OUT data (3SG only; -> cmd3d_buf) */
+    void       *resp;  uint32 resp_size;  /* IN (<- DMA resp_buf; 0 = none)    */
+    uint32  result;            /* bytes written into resp (0 = timeout/error)  */
 };
 
 /* Lifecycle (chip_gpu_srv.c). */
@@ -57,7 +60,22 @@ void chip_gpu_srv_stop(struct ChipGPUState *gs);
 
 /* Synchronous submit: PutMsg to the server, block on the reply, return
  * req->result.  If req->msg.mn_ReplyPort is NULL a transient port is used.
- * Caller fills op/flags/*_phys/*_size and (optionally) ln_Pri first. */
+ * Caller fills op/flags/cmd/data/resp and (optionally) ln_Pri first.
+ * Returns 0 (and does nothing) if the server isn't running -> caller falls
+ * back to the legacy direct path. */
 uint32 chip_gpu_srv_do(struct ChipGPUState *gs, struct GpuReq *req);
+
+/* Convenience: 2-SG transaction (cmd + resp) via the server, priority `pri`.
+ * Returns the response type (GP32 of resp hdr), or 0 on failure / not-running. */
+uint32 chip_srv_send2(struct ChipGPUState *gs, int pri,
+                      const void *cmd, uint32 cmd_size,
+                      void *resp, uint32 resp_size);
+
+/* Convenience: 3-SG SUBMIT_3D (hdr + data + resp) via the server.
+ * Returns nonzero on success, 0 on failure / not-running. */
+uint32 chip_srv_submit3d(struct ChipGPUState *gs, int pri,
+                         const void *hdr, uint32 hdr_size,
+                         const void *data, uint32 data_size,
+                         void *resp, uint32 resp_size);
 
 #endif /* CHIP_GPU_SRV_H */

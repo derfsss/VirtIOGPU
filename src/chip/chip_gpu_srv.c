@@ -22,34 +22,50 @@
 
 extern struct ChipGPUState *g_chip_state;
 
-/* Execute one request on the control queue (runs in the server task). */
+/* Byte copy into/out of MEMF_SHARED DMA buffers (no memcpy -- newlib). */
+static void srv_bcopy(volatile uint8 *d, const volatile uint8 *s, uint32 n)
+{
+    uint32 i;
+    for (i = 0; i < n; i++) d[i] = s[i];
+}
+
+/* Execute one request on the control queue (runs in the server task).
+ * COPY model: copy the caller's cmd/data into the server-owned DMA buffers,
+ * submit, then copy the response back to the caller.  io_lock is held only
+ * here (server side) to serialise the shared DMA buffers + ring vs the legacy
+ * direct callers -- clients never hold it. */
 static void gpu_srv_exec(struct ChipGPUState *gs, struct GpuReq *req)
 {
     struct ExecIFace *IExec = gs->IExec;
     struct virtqueue *vq = gs->vqs[VIRTIO_GPU_CTRLQ];
     struct vring_sg sg[3];
-    uint32 nout;
+    uint32 nout, rsize;
     void *cookie;
 
-    if (!vq) { req->result = 0; return; }
+    if (!vq || !req->cmd || !req->cmd_size) { req->result = 0; return; }
+    rsize = req->resp_size ? req->resp_size
+                           : (uint32)sizeof(struct virtio_gpu_ctrl_hdr);
+
+    IExec->MutexObtain(gs->io_lock);
+
+    srv_bcopy((volatile uint8 *)gs->cmd_buf, (const volatile uint8 *)req->cmd,
+              req->cmd_size);
+    chip_zero(gs->resp_buf, rsize);
 
     if (req->op == GPUREQ_3SG) {
-        sg[0].addr = req->hdr_phys;  sg[0].len = req->hdr_size;
-        sg[1].addr = req->data_phys; sg[1].len = req->data_size;
-        sg[2].addr = req->resp_phys; sg[2].len = req->resp_size;
+        srv_bcopy((volatile uint8 *)gs->cmd3d_buf,
+                  (const volatile uint8 *)req->data, req->data_size);
+        sg[0].addr = gs->cmd_buf_phys;  sg[0].len = req->cmd_size;
+        sg[1].addr = gs->cmd3d_phys;    sg[1].len = req->data_size;
+        sg[2].addr = gs->resp_buf_phys; sg[2].len = rsize;
         nout = 2;
     } else {
-        sg[0].addr = req->hdr_phys;  sg[0].len = req->hdr_size;
-        sg[1].addr = req->resp_phys; sg[1].len = req->resp_size;
+        sg[0].addr = gs->cmd_buf_phys;  sg[0].len = req->cmd_size;
+        sg[1].addr = gs->resp_buf_phys; sg[1].len = rsize;
         nout = 1;
     }
 
     cookie = (void *)IExec->FindTask(NULL);   /* the server task */
-
-    /* Transition lock: the ring is still shared with legacy direct callers.
-     * Held only around the ring op here (the win vs. the old model is that
-     * CLIENTS no longer hold io_lock at all -- they wait on their reply port). */
-    IExec->MutexObtain(gs->io_lock);
     {
         int32 rc = VirtQueue_AddBuf(IExec, vq, sg, nout, 1, cookie);
         if (rc == 0) {
@@ -59,6 +75,11 @@ static void gpu_srv_exec(struct ChipGPUState *gs, struct GpuReq *req)
             req->result = 0;
         }
     }
+
+    if (req->resp && req->resp_size && req->result)
+        srv_bcopy((volatile uint8 *)req->resp,
+                  (const volatile uint8 *)gs->resp_buf, req->resp_size);
+
     IExec->MutexRelease(gs->io_lock);
 }
 
@@ -180,4 +201,35 @@ uint32 chip_gpu_srv_do(struct ChipGPUState *gs, struct GpuReq *req)
         req->msg.mn_ReplyPort = NULL;
     }
     return r;
+}
+
+uint32 chip_srv_send2(struct ChipGPUState *gs, int pri,
+                      const void *cmd, uint32 cmd_size,
+                      void *resp, uint32 resp_size)
+{
+    struct GpuReq req;
+    chip_zero(&req, sizeof(req));
+    req.op = GPUREQ_2SG;
+    req.msg.mn_Node.ln_Pri = (BYTE)pri;
+    req.cmd = cmd;   req.cmd_size = cmd_size;
+    req.resp = resp; req.resp_size = resp_size;
+    if (!chip_gpu_srv_do(gs, &req)) return 0;   /* not running / failed */
+    if (resp && resp_size >= sizeof(struct virtio_gpu_ctrl_hdr))
+        return GP32(((struct virtio_gpu_ctrl_hdr *)resp)->type);
+    return req.result;
+}
+
+uint32 chip_srv_submit3d(struct ChipGPUState *gs, int pri,
+                         const void *hdr, uint32 hdr_size,
+                         const void *data, uint32 data_size,
+                         void *resp, uint32 resp_size)
+{
+    struct GpuReq req;
+    chip_zero(&req, sizeof(req));
+    req.op = GPUREQ_3SG;
+    req.msg.mn_Node.ln_Pri = (BYTE)pri;
+    req.cmd = hdr;   req.cmd_size = hdr_size;
+    req.data = data; req.data_size = data_size;
+    req.resp = resp; req.resp_size = resp_size;
+    return chip_gpu_srv_do(gs, &req);   /* nonzero result = ok */
 }

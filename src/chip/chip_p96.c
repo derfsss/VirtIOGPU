@@ -11,6 +11,7 @@
  */
 
 #include "chip/chip_state.h"
+#include "chip/gpu_srv.h"
 #include <dos/dos.h>
 #include <dos/dostags.h>
 #include <proto/dos.h>
@@ -198,6 +199,13 @@ static BOOL chip_SetSwitch(struct BoardInfo *bi, BOOL enabled)
             } else {
                 DCHIP("WARNING: dos flush process creation failed");
             }
+            /* Phase 8: launch the GPU control-queue I/O server now that dos is
+             * confirmed up (it needs CreateNewProcTags).  Clients route their
+             * GPU ops through it instead of holding io_lock across the wait. */
+            if (chip_gpu_srv_start(gs))
+                DCHIP("gpu_srv: I/O server launched");
+            else
+                DCHIP("gpu_srv: launch failed -- legacy io_lock path in use");
         } else {
             DCHIP("WARNING: dos.library still not available for flush task");
         }

@@ -271,6 +271,12 @@ struct ChipGPUState {
     struct Process *flush_proc;
     volatile BOOL   flush_task_quit;
     BOOL            flush_running;      /* TRUE if any flush mechanism active */
+
+    /* Phase 8: GPU control-queue I/O server task (gpu_srv).  Owns CTRLQ; clients
+     * post GpuReq messages instead of holding io_lock across the GPU wait. */
+    struct Process *gpu_srv_proc;
+    struct MsgPort *gpu_srv_port;       /* published by the server when ready */
+    volatile BOOL   gpu_srv_running;
     BOOL            clut_debug_done;    /* one-shot CLUT conversion debug */
     struct Task    *flush_task;         /* populated in flush task entry */
     int8            flush_sig_bit;      /* AllocSignal(-1) result, -1 if none */

@@ -67,6 +67,7 @@ CHIP_SRC     = src/chip/chip_lib.c \
                src/chip/chip_irq.c \
                src/chip/chip_perf.c \
                src/chip/chip_v3d.c \
+               src/chip/chip_gpu_srv.c \
                src/chip/chip_init.c
 CHIP_OBJ     = $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(CHIP_SRC))
 CHIP_VQ_OBJ  = $(BUILD_DIR)/chip/virtqueue_chip.o

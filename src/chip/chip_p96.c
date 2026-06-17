@@ -626,6 +626,9 @@ static BOOL chip_SetDisplay(struct BoardInfo *bi, BOOL enabled)
             DCHIP("WARNING: CreateTaskTags failed for flush task "
                   "(will retry via dos.library in SetSwitch)");
         }
+        /* Phase 8: launch the GPU control-queue I/O server (idempotent). */
+        if (chip_gpu_srv_start(gs))
+            DCHIP("gpu_srv: I/O server launched");
     }
 
     if (enabled) chip_flush_signal_activity(gs);

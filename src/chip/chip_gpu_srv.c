@@ -16,9 +16,6 @@
 
 #include "chip/chip_state.h"
 #include "chip/gpu_srv.h"
-#include <dos/dos.h>
-#include <dos/dostags.h>
-#include <proto/dos.h>
 
 extern struct ChipGPUState *g_chip_state;
 
@@ -127,25 +124,16 @@ BOOL chip_gpu_srv_start(struct ChipGPUState *gs)
 {
     struct ExecIFace *IExec = gs->IExec;
 
-    if (gs->gpu_srv_running) return TRUE;
+    if (gs->gpu_srv_running || gs->gpu_srv_task) return TRUE;
 
-    if (!gs->IDOS) {
-        if (!gs->DOSBase)
-            gs->DOSBase = IExec->OpenLibrary("dos.library", 54);
-        if (gs->DOSBase)
-            gs->IDOS = (struct DOSIFace *)
-                IExec->GetInterface(gs->DOSBase, "main", 1, NULL);
-    }
-    if (!gs->IDOS) { DCHIP("gpu_srv: no dos.library"); return FALSE; }
-
-    gs->gpu_srv_proc = gs->IDOS->CreateNewProcTags(
-        NP_Entry,     (ULONG)gpu_srv_entry,
-        NP_Name,      (ULONG)"virtiogpu.gpusrv",
-        NP_StackSize, 32768,
-        NP_Priority,  5,
-        NP_Child,     TRUE,
-        TAG_DONE);
-    if (!gs->gpu_srv_proc) { DCHIP("gpu_srv: CreateNewProc failed"); return FALSE; }
+    /* CreateTaskTags (no dos dependency) -- mirrors the flush task's primary
+     * creation path; properly inits tc_MemEntry etc. (avoids the DSI seen with
+     * manual AllocVec+AddTask).  Priority 5: below the pri-10 flush/present so
+     * the present preempts the server between its GPU ops. */
+    gs->gpu_srv_task = IExec->CreateTaskTags(
+        "virtiogpu.gpusrv", 5,
+        (CONST_APTR)gpu_srv_entry, 32768, TAG_DONE);
+    if (!gs->gpu_srv_task) { DCHIP("gpu_srv: CreateTaskTags failed"); return FALSE; }
 
     /* Readiness is observed lazily via gs->gpu_srv_port in chip_gpu_srv_do
      * (callers fall back to the legacy path until the port is published). */

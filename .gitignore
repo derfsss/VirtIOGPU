@@ -40,3 +40,6 @@ docs/pcigraphics_card_analysis.md
 docs/siliconmotion502_chip_analysis.md
 docs/aos4_boardinfo_offsets.md
 docs/virtiov1.2-gpu.txt
+
+# RE agent scratch (disassembly dumps)
+tmp_re/

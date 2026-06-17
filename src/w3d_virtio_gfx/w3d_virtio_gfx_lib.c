@@ -74,9 +74,39 @@ static const struct TagItem _mgr_Tags[] =
     { TAG_DONE,        0                 }
 };
 
-/* ---- "main" GFX-driver interface (probe) ---- */
+/* ---- "main" GFX-driver interface ----
+ * NB: the Warp3D GFX-driver `main` interface is NOT a standard managed interface
+ * with Release/Expunge/Clone at vectors 1/2/3.  After Obtain (vec0, off 0x4c) the
+ * FE treats every vector as a real GFX op.  In particular the FE's CreateContext
+ * calls vec1 (off 0x50) as the per-context SETUP op: `GFX->[0x50](Self, ctx)` --
+ * it must return 0 (W3D_SUCCESS) and populate ctx->format (0x28) + supportedfmt
+ * (0x24) from the destination bitmap, else CreateContext fails W3D_UNSUPPORTEDFMT
+ * (-18) at the `(ctx->format & ctx->supportedfmt) != 0` check (FE @0x... line 654).
+ * The stock W3D_Picasso96 derives these from the bitmap's pixel format; we accept
+ * our virtio P96 board and advertise all formats supported.
+ * W3D_Context offsets (verified vs SDK warp3d.h): supportedfmt=0x24, format=0x28,
+ * drawregion=0x20, width=0x34, height=0x38. */
 static uint32 _main_Obtain(struct Interface *Self)  { return Self->Data.RefCount++; }
 static uint32 _main_Release(struct Interface *Self) { return Self->Data.RefCount--; }
+
+/* vec1 (off 0x50): per-context GFX setup.  param1 = W3D_Context*. */
+static uint32 gfx_OpenCtx(APTR Self, uint32 ctx, uint32 b, uint32 c, uint32 d)
+{
+    (void)Self; (void)b; (void)c; (void)d;
+    DBP("vec 1 (off 0x50) OpenCtx ctx=%08lx drawregion=%08lx\n",
+        (unsigned long)ctx, (unsigned long)(ctx ? *(volatile uint32 *)(ctx + 0x20) : 0));
+    if (ctx) {
+        /* Advertise all dest formats supported so the FE's (format & supportedfmt)
+         * check passes for the cow's WB bitmap.  format must be non-zero and
+         * intersect supportedfmt; the FE also passes ctx->format as the destfmt
+         * to the HW driver's per-format queries.  (TODO B-gfx2b: derive the real
+         * W3D dest-format bit from the bitmap pixel format instead of 0x1/all.) */
+        *(volatile uint32 *)(ctx + 0x24) = 0xFFFFFFFF;  /* supportedfmt = all */
+        if (*(volatile uint32 *)(ctx + 0x28) == 0)      /* format (FE preset 0) */
+            *(volatile uint32 *)(ctx + 0x28) = 0x00000001;
+    }
+    return 0;  /* W3D_SUCCESS */
+}
 
 /* Per-vector logging stub.  Instance byte-offset of vector N = 76 + N*4 (same
  * 76-byte InterfaceData header as the HW backend); logging confirms the actual
@@ -92,8 +122,8 @@ GFXSTUB(20) GFXSTUB(21) GFXSTUB(22) GFXSTUB(23)
 
 static const APTR _main_Vectors[] __attribute__((used)) =
 {
-    (APTR)_main_Obtain,   /* vec 0  off 0x4c  Obtain  */
-    (APTR)_main_Release,  /* vec 1  off 0x50  Release */
+    (APTR)_main_Obtain,   /* vec 0  off 0x4c  Obtain                 */
+    (APTR)gfx_OpenCtx,    /* vec 1  off 0x50  per-context SETUP op    */
     (APTR)gfx_s2,  (APTR)gfx_s3,  (APTR)gfx_s4,  (APTR)gfx_s5,  (APTR)gfx_s6,
     (APTR)gfx_s7,  (APTR)gfx_s8,  (APTR)gfx_s9,  (APTR)gfx_s10, (APTR)gfx_s11,
     (APTR)gfx_s12, (APTR)gfx_s13, (APTR)gfx_s14, (APTR)gfx_s15, (APTR)gfx_s16,

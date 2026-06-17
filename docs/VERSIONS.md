@@ -2076,13 +2076,24 @@ present → freeze under load.
   need a priority param. Next session: deploy 53.209, verify cursor moves +
   cow window shows on the actual display.
 
-**Phase 8 Part B (locked, not started)** — build a `W3D_VirtIOGPU.library` HW
-backend under the stock `Warp3D.library` front-end so ALL Warp3D/MiniGL apps
-work, not just via the custom warp3d.library. Backend ABI fully RE'd
-(`struct W3DHWIFace`, 83-slot vtable, `CreateContext(Self, W3D_Context*)`,
-79-op map). Ships a PINNED stock-FE version + our backend matched to its
-dispatch order (FE/backend order is version-specific). Do after Part A is
-verified.
+**Phase 8 Part B — `W3D_VirtIOGPU.library` HW backend (IN PROGRESS, 2026-06-17)**
+A real HW backend under the stock `Warp3D.library` front-end so ALL Warp3D/MiniGL
+apps work, not just via the custom warp3d.library.
+
+- **Pinned FE = `Warp3D.library 53.27`** (FE Update 1 / X5000 CD): the install-CD
+  53.22 is too old (88 vectors, no modern array API); 53.27 has the full 96-op
+  API, is symboled, and is the newest Warp3D for AmigaOne (Updates 2/3 ship none).
+- **B1 (done, committed):** `src/w3d_virtio/w3d_virtio_lib.c` — backend skeleton
+  (`struct W3DHWIFace`, manager + 88 vectors, `MIT_DataSize`). **Runtime-proven:**
+  the stock FE 53.27 loads our backend and dispatches into its vtable.
+- **B2 root cause (Ghidra):** decompiled the FE's `Warp3D_Init` registration +
+  selection. Our backend IS registered and selected (the env-name path was a red
+  herring — the no-env fallback picks us). The blocker is the FE's **per-context
+  Z-buffer/setup self-test** (`AllocZBuffer → Clear → ReadZPixel/ReadZSpan`) which
+  our no-op probe stubs fail, so `CreateContext`/draws never complete.
+- **Next:** implement a real per-context Z buffer + backend `CreateContext`, then
+  port the proven virgl render core into the draw slots; A/B against Wazp3D; retire
+  the custom warp3d.library. Detail in the `reference-warp3d-driver-model` memory.
 
 ---
 

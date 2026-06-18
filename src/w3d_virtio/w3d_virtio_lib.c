@@ -204,7 +204,17 @@ static uint32 hw_dispatch(long slot, uint32 a, uint32 b, uint32 c, uint32 d, uin
     /* slot23 (off 0xa8) is the format-support query the cow's CreateContext
      * actually hammers (format ids 0x6f-0x72,0x14-0x17 + destfmt); the loop
      * needs == 5 to treat the format as supported (else -18 UNSUPPORTEDFMT). */
-    case 23: ret = 5;      break;
+    case 23:
+        /* slot23 (Query) is called with a=W3D_Context* throughout the cow's
+         * ResetTexBlend BEFORE W3D_SetTextureBlend.  The FE gates SetTextureBlend
+         * on ctx+0xd0 > 4 (TMU caps), but the cow's CreateContext path never sets
+         * ctx+0xd0 (the FE writes it only on an alternate select path at
+         * ghidra_fe5327.txt:776/779, and slot9/CreateContext is never dispatched
+         * to us).  Force ctx+0xd0 = 8 here (RAM-guarded) so SetTextureBlend
+         * dispatches instead of returning -30 -> cow advances to DrawObject. */
+        if (a >= 0x10000000 && a < 0x80000000)
+            *(volatile uint32 *)(a + 0xd0) = 8;
+        ret = 5; break;
     case 5:  ret = 1;      break;   /* CheckIdle -> idle/ready (cow polls it)      */
     case 57: ret = 0x48aa; break;   /* identify -> chip magic (informational)     */
     case 61: ret = (uint32)(APTR)g_dummy_state; break; /* ClearDrawRegion (unused: vtable wires real) */

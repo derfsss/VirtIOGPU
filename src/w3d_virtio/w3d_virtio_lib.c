@@ -273,13 +273,19 @@ static uint32 hw_ClearDrawRegion(APTR Self, W3D_Context *ctx, uint32 color)
 static APTR get_wv(W3D_Context *ctx)
 {
     uint32 err = 0;
+    uint32 c   = (uint32)(APTR)ctx;
     W3D_Context *inner;
-    if (!ctx_ok(ctx)) return 0;          /* bogus/registration ctx -> no wv      */
-    if (ctx->driver) return ctx->driver; /* already created                       */
+    /* RANGE-only guard (NOT ctx_ok, which requires ctx->driver!=0 -- the opposite
+     * of what we need: get_wv CREATES the driver when it's 0). */
+    if (c < 0x10000000 || c >= 0x80000000) return 0;  /* bogus/registration ctx   */
+    if (ctx->driver) return ctx->driver;              /* already created          */
+    DBP("get_wv: creating, ctx=%08lx drawregion=%08lx w=%ld h=%ld g_IV3D=%08lx\n",
+        (unsigned long)(APTR)ctx, (unsigned long)(APTR)ctx->drawregion,
+        (long)ctx->width, (long)ctx->height, (unsigned long)(APTR)g_IV3D);
     inner = w3d_CreateContextTags((struct Warp3DIFace *)0, &err,
                 W3D_CC_BITMAP, (uint32)(APTR)ctx->drawregion, TAG_DONE);
-    if (!inner) return 0;
-    if (!inner->driver) { IExec->FreeVec(inner); return 0; }
+    if (!inner) { DBP("get_wv: CreateContextTags NULL err=%ld\n", (long)err); return 0; }
+    if (!inner->driver) { DBP("get_wv: inner->driver NULL err=%ld\n", (long)err); IExec->FreeVec(inner); return 0; }
     ctx->driver   = inner->driver;       /* take the W3DVirgl                     */
     ctx->width    = inner->width;
     ctx->height   = inner->height;

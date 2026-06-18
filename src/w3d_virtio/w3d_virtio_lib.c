@@ -386,6 +386,17 @@ static uint32 hw_Clear65(APTR Self, W3D_Context *ctx, uint32 color)
     if (!get_wv(ctx)) return 0;
     return w3d_ClearDrawRegion((struct Warp3DIFace *)0, ctx, color);
 }
+/* slot 80 (off 0x17c): the FE routes W3D_ClearBuffers HERE when ctx+0xd0 > 4
+ * (our hw_SetStateFn forces 0xd0=8), dropping the colour/depth args -- so the cow's
+ * per-frame clear lands here, NOT at slot 65.  Without it the RT + depth never
+ * re-clear -> colour trails + progressive ZLESS rejection.  Black matches the cow's
+ * clear colour (rgb=0); the deferred clear is COLOR0|DEPTH so depth re-clears too. */
+static uint32 hw_Clear80(APTR Self, W3D_Context *ctx, uint32 b, uint32 c, uint32 d)
+{
+    (void)Self; (void)b; (void)c; (void)d;
+    if (!get_wv(ctx)) return 0;
+    return w3d_ClearDrawRegion((struct Warp3DIFace *)0, ctx, 0xFF000000);
+}
 
 static const APTR _main_Vectors[] __attribute__((used)) =
 {
@@ -434,7 +445,7 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)hw_s71,           /* 71 (BindTexture is idx 75 at base 60) */
     (APTR)hw_s72, (APTR)hw_s73, (APTR)hw_SetStateFn, /* 74 SetState (base 60, off 356) */
     (APTR)w3d_BindTexture, /* 75 BindTexture (base 60, off 360) */
-    (APTR)hw_s76, (APTR)hw_s77, (APTR)hw_s78, (APTR)hw_s79, (APTR)hw_s80, (APTR)hw_s81,
+    (APTR)hw_s76, (APTR)hw_s77, (APTR)hw_s78, (APTR)hw_s79, (APTR)hw_Clear80, /* 80 ClearBuffers (ctx+0xd0>4 path, off 0x17c) */ (APTR)hw_s81,
     (APTR)hw_s82, (APTR)hw_s83, (APTR)hw_s84, (APTR)hw_s85, (APTR)hw_s86, (APTR)hw_s87,
     (APTR)-1              /* sentinel */
 };

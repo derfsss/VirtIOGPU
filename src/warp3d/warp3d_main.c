@@ -208,8 +208,16 @@ static void bind_blend(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
 static void bind_rt_framebuffer(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
 {
     uint32 surf = wv->rt_surface[wv->draw_idx];
+    float hw = (float)wv->fb_w * 0.5f, hh = (float)wv->fb_h * 0.5f;
     /* colour surface + depth (zsurf) so the depth test has a buffer */
     virgl_cmd_set_framebuffer_state(cbuf, 1, wv->zsurf, &surf);
+    /* Re-assert the viewport at the RT size EVERY draw.  We share the chip's virgl
+     * context, whose viewport is the scanout size (e.g. 1280x800); without this the
+     * 640x480 cow is scaled ~2x and pushed bottom-right.  POSITIVE scale_y -- the
+     * present blit is not Y-flipped, so this keeps the cow upright. */
+    virgl_cmd_set_viewport(cbuf, 0, hw, hh, 0.5f, hw, hh, 0.5f);
+    /* scissor >= RT so it never clips (the chip left it at scanout size) */
+    virgl_cmd_set_scissor_state(cbuf, 0, 0, 0, wv->fb_w, wv->fb_h);
     /* bind our depth-test DSA (the chip's default DSA has depth off) */
     if (wv->dsa_handle)
         virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_DSA, wv->dsa_handle);

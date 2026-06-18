@@ -350,22 +350,41 @@ static uint32 hw_s79(APTR Self, W3D_Context *ctx, void *p, uint32 stride,
  * r4-r8 (it doesn't reload them) -> we receive the genuine mesh indices (PI),
  * unlike slot76's sequential submit counter.  Forward to the render core, which
  * gathers verts from the slot79-stashed InterleavedArray by these indices. */
-static uint32 hw_s69(APTR Self, W3D_Context *ctx, uint32 prim, uint32 type,
-                     uint32 count, void *indices)
+/* idx 69 (base 60, off 0x150) = VertexPointer, NOT DrawElements (that's idx 73).
+ * The cow uses InterleavedArray, not standalone VertexPointer -- no-op it. */
+static uint32 hw_s69(APTR Self, W3D_Context *ctx, uint32 a, uint32 b, uint32 c, uint32 d)
+{
+    (void)Self; (void)ctx; (void)a; (void)b; (void)c; (void)d;
+    return 0;
+}
+
+/* ---- base-60 corrected state/clear handlers (FE leaves args r4=ctx, r5+=rest) --- */
+/* SetState(ctx, state, action) -- FE dispatches at off 152 (idx 23) AND 356 (idx 74).
+ * Apply the W3D state (ZBUFFER/GOURAUD/cull/blend enables) into wv, and keep the
+ * ctx+0xd0=8 TMU-caps poke that gates SetTextureBlend. */
+static uint32 hw_SetStateFn(APTR Self, W3D_Context *ctx, uint32 state, uint32 action)
 {
     (void)Self;
-    if (!get_wv(ctx)) return (uint32)W3D_ILLEGALINPUT;
-    if (indices && (uint32)(APTR)indices >= 0x10000000 && (uint32)(APTR)indices < 0x80000000) {
-        const volatile uint32 *pi = (const volatile uint32 *)indices;
-        DBP("slot69 DrawElements prim=%lu type=%lu count=%lu PI[0..2]=%lu,%lu,%lu\n",
-            (unsigned long)prim, (unsigned long)type, (unsigned long)count,
-            (unsigned long)pi[0], (unsigned long)pi[1], (unsigned long)pi[2]);
-    } else {
-        DBP("slot69 DrawElements prim=%lu type=%lu count=%lu idx=%08lx (no PI)\n",
-            (unsigned long)prim, (unsigned long)type, (unsigned long)count,
-            (unsigned long)indices);
-    }
-    return w3d_DrawElements((struct Warp3DIFace *)0, ctx, prim, type, count, indices);
+    if (!get_wv(ctx)) return 0;
+    *(volatile uint32 *)((UBYTE *)ctx + 0xd0) = 8;
+    return w3d_SetState((struct Warp3DIFace *)0, ctx, state, action);
+}
+/* SetZCompareMode(ctx, mode) at off 208 (idx 37): the render core's DSA is already
+ * LESS+write (matches the cow's ZLESS), so accept it. */
+static uint32 hw_SetZCompare(APTR Self, W3D_Context *ctx, uint32 mode)
+{
+    (void)Self; (void)mode;
+    if (!get_wv(ctx)) return 0;
+    return 0;   /* W3D_SUCCESS */
+}
+/* ClearBuffers/ClearDrawRegion at off 320 (idx 65): the cow's per-frame clear.  The
+ * render core's frame_clear (via w3d_ClearDrawRegion) clears BOTH colour+depth on the
+ * next draw -- THE depth-cull fix (depth buffer must re-clear each frame for ZLESS). */
+static uint32 hw_Clear65(APTR Self, W3D_Context *ctx, uint32 color)
+{
+    (void)Self;
+    if (!get_wv(ctx)) return 0;
+    return w3d_ClearDrawRegion((struct Warp3DIFace *)0, ctx, color);
 }
 
 static const APTR _main_Vectors[] __attribute__((used)) =
@@ -377,44 +396,44 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     /* slots 4..87.  Geometry/lifecycle slots wired to the proven w3d_* render
      * core; the rest stay probe/tuned stubs (hw_sN).  Slot->op from
      * tmp_re/fe5327_map2.txt (backend off = 76 + slot*4). */
-    (APTR)hw_AllocZBuffer,  /* 4  AllocZBuffer (ctx-guarded) */
+    (APTR)hw_s4,            /* 4  (AllocZBuffer is idx 8 at base 60) */
     (APTR)hw_s5,            /* 5  CheckIdle->1  */
     (APTR)hw_s6,            /* 6  ClearStencilBuffer */
-    (APTR)w3d_ClearBuffers, /* 7  ClearBuffers  */
-    (APTR)hw_s8,            /* 8  */
+    (APTR)hw_s7,            /* 7  (ClearBuffers is idx 65 at base 60) */
+    (APTR)hw_AllocZBuffer,  /* 8  AllocZBuffer (base 60, off 92) */
     (APTR)hw_CreateContext, /* 9  CreateContext */
     (APTR)hw_s10, (APTR)hw_s11, (APTR)hw_s12,
     (APTR)hw_s13,           /* 13 (was DrawTriangle: mis-mapped state op) */
     (APTR)hw_s14, (APTR)hw_s15, (APTR)hw_s16, (APTR)hw_s17, (APTR)hw_s18,
     (APTR)hw_s19,           /* 19 SetState/Query/format-query -> 5 (keep) */
     (APTR)hw_s20, (APTR)hw_s21, (APTR)hw_s22,
-    (APTR)hw_s23,           /* 23 format-query -> 5 (keep) */
+    (APTR)hw_SetStateFn,    /* 23 SetState (base 60, off 152) + ctx+0xd0 poke */
     (APTR)hw_DestroyContext,/* 24 DestroyContext */
-    (APTR)w3d_SetBlendMode, /* 25 SetBlendMode  */
-    (APTR)hw_s26, (APTR)hw_s27, (APTR)hw_s28, (APTR)hw_s29,
+    (APTR)hw_s25,           /* 25 (SetBlendMode is idx 29 at base 60) */
+    (APTR)hw_s26, (APTR)hw_s27, (APTR)hw_s28, (APTR)w3d_SetBlendMode, /* 29 SetBlendMode (base 60) */
     (APTR)hw_s30, (APTR)hw_s31, (APTR)hw_s32, (APTR)hw_s33, (APTR)hw_s34, (APTR)hw_s35,
     (APTR)hw_s36, /* 36 (was DrawTriStrip: mis-mapped) */
-    (APTR)hw_s37,   /* 37 (was DrawTriFan: =SetZCompareMode! crashed) */
+    (APTR)hw_SetZCompare, /* 37 SetZCompareMode (base 60, off 208) */
     (APTR)hw_s38, (APTR)hw_s39,
     (APTR)hw_s40, (APTR)hw_s41, (APTR)hw_s42, (APTR)hw_s43, (APTR)hw_s44, (APTR)hw_s45,
     (APTR)hw_s46, (APTR)hw_s47, (APTR)hw_s48, (APTR)hw_s49, (APTR)hw_s50, (APTR)hw_s51,
     (APTR)hw_s52, (APTR)hw_s53, (APTR)hw_s54, (APTR)hw_s55, (APTR)hw_s56,
     (APTR)hw_s57,           /* 57 identify -> 0x48aa (keep) */
-    (APTR)w3d_FlushFrame,   /* 58 FlushFrame    */
+    (APTR)hw_s58,           /* 58 (SetDrawRegion; FlushFrame is idx 62 at base 60) */
     (APTR)hw_s59, (APTR)hw_s60,
-    (APTR)hw_ClearDrawRegion, /* 61 ClearDrawRegion (ctx-guarded) */
-    (APTR)hw_s62, /* 62 (was DrawTriangleV: mis-mapped) */
-    (APTR)hw_s63, /* 63 (was DrawTriStripV: mis-mapped) */
-    (APTR)hw_s64,   /* 64 (was DrawTriFanV: mis-mapped) */
-    (APTR)hw_s65,/* 65 (was VertexPointer: cow uses 73/74/79) */
+    (APTR)hw_s61,             /* 61 (clear is idx 65 at base 60) */
+    (APTR)w3d_FlushFrame, /* 62 FlushFrame (base 60, off 308) */
+    (APTR)hw_s63, /* 63 */
+    (APTR)hw_s64,   /* 64 */
+    (APTR)hw_Clear65,/* 65 ClearBuffers/ClearDrawRegion (base 60, off 320) -- DEPTH CLEAR */
     (APTR)hw_s66,           /* 66 TexCoordPointer (stub: textures lag) */
     (APTR)hw_s67, /* 67 (was ColorPointer: cow uses 79) */
     (APTR)hw_s68,    /* 68 (was DrawArray: mis-mapped) */
     (APTR)hw_s69,           /* 69 (was DrawElements: cow draws via 76/79/80) */
     (APTR)hw_s70,
-    (APTR)w3d_BindTexture,  /* 71 BindTexture   */
-    (APTR)hw_s72, (APTR)hw_s73, (APTR)hw_s74,
-    (APTR)hw_s75, /* 75 (cow uses 79 for InterleavedArray) */
+    (APTR)hw_s71,           /* 71 (BindTexture is idx 75 at base 60) */
+    (APTR)hw_s72, (APTR)hw_s73, (APTR)hw_SetStateFn, /* 74 SetState (base 60, off 356) */
+    (APTR)w3d_BindTexture, /* 75 BindTexture (base 60, off 360) */
     (APTR)hw_s76, (APTR)hw_s77, (APTR)hw_s78, (APTR)hw_s79, (APTR)hw_s80, (APTR)hw_s81,
     (APTR)hw_s82, (APTR)hw_s83, (APTR)hw_s84, (APTR)hw_s85, (APTR)hw_s86, (APTR)hw_s87,
     (APTR)-1              /* sentinel */

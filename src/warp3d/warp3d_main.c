@@ -1059,10 +1059,15 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
         if (wv->texenv_mode == W3D_BLEND)
             virgl_cmd_set_constant_buffer(&cbuf, PIPE_SHADER_FRAGMENT, 0,
                                           wv->texenv_color, 4);
+        wv->ve3_bound = TRUE;
     } else {
-        /* ORIGINAL 2-attr path (REPLACE / untextured) -- rebind VE to undo any
-         * prior wide draw's VE3 bind. */
-        virgl_cmd_bind_object(&cbuf, VIRGL_OBJECT_VERTEX_ELEMENTS, wv->info.ve_handle);
+        /* ORIGINAL 2-attr path (REPLACE / untextured).  Rebind VE *only* to undo a
+         * prior wide draw's VE3 bind -- so an all-REPLACE workload (the cow) emits
+         * the EXACT original command stream (no per-draw VE bind). */
+        if (wv->ve3_bound) {
+            virgl_cmd_bind_object(&cbuf, VIRGL_OBJECT_VERTEX_ELEMENTS, wv->info.ve_handle);
+            wv->ve3_bound = FALSE;
+        }
         virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_VERTEX, wv->info.vs_handle);
         if (ti) {
             virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, wv->info.fs_tex_handle);

@@ -72,6 +72,9 @@ struct W3DVirgl {
      * the cow/cosmos on the existing 2-attr path (R8). */
     uint32 texenv_mode;          /* W3D_REPLACE/DECAL/MODULATE/BLEND (1..4) */
     float  texenv_color[4];      /* env colour r,g,b,a (W3D_BLEND -> CONST[0]) */
+    BOOL   ve3_bound;            /* TRUE if last draw bound the wide VE3 (stride 48);
+                                  * REPLACE rebinds VE only to undo it (keeps the
+                                  * cow's REPLACE path byte-identical otherwise). */
 
     /* Deferred clear: ClearDrawRegion records the colour; the next draw emits
      * clear+draw in ONE submit so the chip's composite never observes the RT

@@ -2118,6 +2118,28 @@ without our custom warp3d.library.
 - Commits: 5453992 (port), 31bf723 (crash-fix), a9397c6 (draw slots), 6ee439a
   (per-draw present). Guest: Picasso96 → .off in GFXdrivers/.
 
+### COW RENDERS GEOMETRY — first end-to-end render (18.06.2026)
+
+Cleared the whole gate chain and got the cow drawing through the stock Warp3D FE:
+- **SetTextureBlend −30** → forced `ctx+0xd0=8` via slot23 (e736c4d). The FE only
+  writes `ctx+0xd0` on an alternate CreateContext path the cow skips, and
+  slot9/CreateContext is never dispatched to the backend.
+- **Crash** (cow `SetZCompareMode` → a mis-mapped draw slot) → reverted the fork's
+  speculative draw-slot wirings (1f375d4); the slot map mislabeled several state
+  ops (e.g. slot37) as `Draw*`.
+- **Lazy `get_wv`** (8c077c1/d922723): per-context virgl state created on first
+  use (FE never dispatches CreateContext to us); fixed a `ctx_ok` dead-code bug.
+- **Present pipeline confirmed** (`FlushFrame → v3d Present → window bitmap`) —
+  window went grey → black → geometry.
+- **slot76 draw wired** (9b69c0f/3117a3a) → `w3d_DrawElements(TRIANGLES)`.
+- **Result:** cow renders 5813 tris / 2914 pts end-to-end (stock FE → our GFX
+  driver → our HW backend → virgl → present), but **DISTORTED**.
+- **Remaining (1 bug):** vertex indexing — slot76's `word1` is a sequential submit
+  counter, not the mesh index (`0x80289Cxx` words are unmapped, not ptrs); we draw
+  `ia_ptr[counter]` so verts connect in submission order (spikes). Fix = decode the
+  slot76/75/80 submit protocol's real gathered-vertex source. Detail + gdb method
+  in the `reference-warp3d-driver-model` memory.
+
 ---
 
 ## Planned releases

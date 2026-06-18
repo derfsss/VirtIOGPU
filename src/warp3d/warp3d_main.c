@@ -423,8 +423,13 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
         virgl_cmd_create_dsa(&dcb, 301,
             VIRGL_DSA_S0_DEPTH_ENABLE(1) | VIRGL_DSA_S0_DEPTH_WRITEMASK(0) |
             VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_LESS), 0, 0, 0.0f);
+        /* 302 = "depth off": well-formed as test-ENABLED + func ALWAYS + no write
+         * (a bare DEPTH_ENABLE(0)/s0=0 left the Cosmos overlay invisible -- some
+         * virglrenderer paths mishandle the all-zero DSA).  ALWAYS passes every
+         * fragment, WRITEMASK(0) leaves the depth buffer intact. */
         virgl_cmd_create_dsa(&dcb, 302,
-            VIRGL_DSA_S0_DEPTH_ENABLE(0), 0, 0, 0.0f);   /* depth test off */
+            VIRGL_DSA_S0_DEPTH_ENABLE(1) | VIRGL_DSA_S0_DEPTH_WRITEMASK(0) |
+            VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_ALWAYS), 0, 0, 0.0f);
         g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id, dcb.buf, dcb.dwords);
     }
 

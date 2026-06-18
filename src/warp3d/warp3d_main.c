@@ -121,7 +121,7 @@ static void pack_vertex(float *out, const W3D_Vertex *v,
      * flip relative to the chip's direct-to-scanout render, so window Y maps
      * straight through (no extra flip here) to land upright after the blit. */
     out[0] = 2.0f * v->x / fb_w - 1.0f;   /* ndc x */
-    out[1] = 1.0f - 2.0f * v->y / fb_h;   /* ndc y (flip: window Y-down -> NDC Y-up) */
+    out[1] = 2.0f * v->y / fb_h - 1.0f;   /* ndc y (backend present blit is NOT Y-flipped) */
     out[2] = 0.0f;                        /* ndc z (M1: flat) */
     out[3] = 1.0f;                        /* w */
     out[4] = v->color.r;
@@ -994,7 +994,7 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
             float y = *(const float *)(v + 4);
             float z = *(const float *)(v + 8);   /* screen z (~[0,0.8]) */
             virgl_emit_float(&cbuf, 2.0f * x / fbw - 1.0f);   /* ndc x */
-            virgl_emit_float(&cbuf, 1.0f - 2.0f * y / fbh);   /* ndc y (flip: window Y-down -> NDC Y-up) */
+            virgl_emit_float(&cbuf, 2.0f * y / fbh - 1.0f);   /* ndc y (backend present blit is NOT Y-flipped) */
             virgl_emit_float(&cbuf, z);                       /* ndc z -> depth */
             virgl_emit_float(&cbuf, 1.0f);                    /* w */
         }

@@ -67,6 +67,12 @@ struct W3DVirgl {
     /* Currently bound texture (TMU 0), NULL = untextured (colour) draws. */
     W3D_Texture *cur_tex;
 
+    /* W3D_SetTexEnv combine mode + env colour, read per-draw from the public
+     * W3D_Context (globaltexenvmode/globaltexenvcolor).  Default W3D_REPLACE keeps
+     * the cow/cosmos on the existing 2-attr path (R8). */
+    uint32 texenv_mode;          /* W3D_REPLACE/DECAL/MODULATE/BLEND (1..4) */
+    float  texenv_color[4];      /* env colour r,g,b,a (W3D_BLEND -> CONST[0]) */
+
     /* Deferred clear: ClearDrawRegion records the colour; the next draw emits
      * clear+draw in ONE submit so the chip's composite never observes the RT
      * cleared-but-not-yet-drawn (which makes the geometry flicker). */

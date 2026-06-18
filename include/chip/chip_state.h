@@ -521,6 +521,11 @@ struct ChipGPUState {
 
     /* Vertex pipeline (for textured quad drawing / compositing) */
     uint32  virgl_2d_ve;        /* vertex elements handle */
+    uint32  virgl_2d_vs3;       /* 3-attr VS (pos+tc+colour) for W3D_SetTexEnv */
+    uint32  virgl_2d_fs_modulate; /* W3D_MODULATE fragment shader handle */
+    uint32  virgl_2d_fs_decal;  /* W3D_DECAL fragment shader handle */
+    uint32  virgl_2d_fs_blend;  /* W3D_BLEND fragment shader handle */
+    uint32  virgl_2d_ve3;       /* 3-attr vertex elements (stride 48) handle */
     uint32  virgl_2d_vbuf_res;  /* vertex buffer resource ID (PIPE_BUFFER) */
     uint32  virgl_test_quad;    /* 0=off, 1=colored quad, 2=textured quad (debug) */
 

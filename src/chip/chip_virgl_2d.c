@@ -75,6 +75,11 @@
 #define V2D_HANDLE_SAMPLER       108
 #define V2D_HANDLE_SAMPLER_LINEAR 109
 #define V2D_HANDLE_VE            110
+#define V2D_HANDLE_VS3           111   /* 3-attr VS (pos+tc+colour) for TexEnv  */
+#define V2D_HANDLE_FS_MODULATE   112
+#define V2D_HANDLE_FS_DECAL      113
+#define V2D_HANDLE_FS_BLEND      114
+#define V2D_HANDLE_VE3           115   /* 3-attr VE (0/16/32, stride 48)        */
 
 /* Vertex buffer size in bytes.  64 KiB so warp3d.library can batch large
  * indexed draws (e.g. the cow demo) into one INLINE_WRITE+DRAW_VBO submit;
@@ -289,6 +294,25 @@ BOOL chip_virgl_init_2d(struct ChipGPUState *gs)
         }
     }
 
+    /* W3D_SetTexEnv combine shaders (MODULATE/DECAL/BLEND): wide pos+tc+colour.
+     * Best-effort -- a failed handle stays 0 and the backend falls back to REPLACE.
+     * One shader per submit (the documented one-shader-per-submission rule). */
+    gs->virgl_2d_vs3 = 0; gs->virgl_2d_fs_modulate = 0;
+    gs->virgl_2d_fs_decal = 0; gs->virgl_2d_fs_blend = 0;
+    if (gs->virgl_shaders_ok) {
+        virgl_cmd_reset(&cbuf); virgl_setup_tc_color_vs(&cbuf, V2D_HANDLE_VS3);
+        if (virgl_submit(gs, ctx_id, &cbuf)) gs->virgl_2d_vs3 = V2D_HANDLE_VS3;
+        virgl_cmd_reset(&cbuf); virgl_setup_modulate_fs(&cbuf, V2D_HANDLE_FS_MODULATE);
+        if (virgl_submit(gs, ctx_id, &cbuf)) gs->virgl_2d_fs_modulate = V2D_HANDLE_FS_MODULATE;
+        virgl_cmd_reset(&cbuf); virgl_setup_decal_fs(&cbuf, V2D_HANDLE_FS_DECAL);
+        if (virgl_submit(gs, ctx_id, &cbuf)) gs->virgl_2d_fs_decal = V2D_HANDLE_FS_DECAL;
+        virgl_cmd_reset(&cbuf); virgl_setup_blend_fs(&cbuf, V2D_HANDLE_FS_BLEND);
+        if (virgl_submit(gs, ctx_id, &cbuf)) gs->virgl_2d_fs_blend = V2D_HANDLE_FS_BLEND;
+        DCHIP("virgl_init_2d: texenv shaders vs3=%lu mod=%lu dec=%lu bln=%lu",
+              (unsigned long)gs->virgl_2d_vs3, (unsigned long)gs->virgl_2d_fs_modulate,
+              (unsigned long)gs->virgl_2d_fs_decal, (unsigned long)gs->virgl_2d_fs_blend);
+    }
+
     if (!gs->virgl_shaders_ok) {
         DCHIP("virgl_init_2d: SHADER CREATION FAILED -- shaders disabled");
         DCHIP("virgl_init_2d: CLEAR/BLIT still work, textured draw unavailable");
@@ -370,6 +394,24 @@ BOOL chip_virgl_init_2d(struct ChipGPUState *gs)
         } else {
             gs->virgl_2d_ve = V2D_HANDLE_VE;
             DCHIP("virgl_init_2d: VE=%lu created OK (stride=32)", (unsigned long)V2D_HANDLE_VE);
+        }
+    }
+
+    /* 3-attribute VE for TexEnv combine: pos@0, texcoord@16, colour@32, stride 48. */
+    gs->virgl_2d_ve3 = 0;
+    if (gs->virgl_shaders_ok && gs->virgl_2d_vs3) {
+        struct VirglVertexElement ve3[3];
+        virgl_cmd_reset(&cbuf);
+        ve3[0].src_offset = 0;  ve3[0].instance_divisor = 0;
+        ve3[0].vertex_buffer_index = 0; ve3[0].src_format = PIPE_FORMAT_R32G32B32A32_FLOAT;
+        ve3[1].src_offset = 16; ve3[1].instance_divisor = 0;
+        ve3[1].vertex_buffer_index = 0; ve3[1].src_format = PIPE_FORMAT_R32G32B32A32_FLOAT;
+        ve3[2].src_offset = 32; ve3[2].instance_divisor = 0;
+        ve3[2].vertex_buffer_index = 0; ve3[2].src_format = PIPE_FORMAT_R32G32B32A32_FLOAT;
+        virgl_cmd_create_vertex_elements(&cbuf, V2D_HANDLE_VE3, 3, ve3);
+        if (virgl_submit(gs, ctx_id, &cbuf)) {
+            gs->virgl_2d_ve3 = V2D_HANDLE_VE3;
+            DCHIP("virgl_init_2d: VE3=%lu created (stride 48)", (unsigned long)V2D_HANDLE_VE3);
         }
     }
 
@@ -595,6 +637,11 @@ BOOL chip_virgl_recover_2d(struct ChipGPUState *gs)
     gs->virgl_2d_sampler = 0;
     gs->virgl_2d_sampler_linear = 0;
     gs->virgl_2d_ve = 0;
+    gs->virgl_2d_vs3 = 0;
+    gs->virgl_2d_fs_modulate = 0;
+    gs->virgl_2d_fs_decal = 0;
+    gs->virgl_2d_fs_blend = 0;
+    gs->virgl_2d_ve3 = 0;
     gs->virgl_shaders_ok = FALSE;
     gs->virgl_samplers_ok = FALSE;
 

@@ -45,6 +45,11 @@ static BOOL v3d_ObtainContext(struct V3DIFace *Self, struct BitMap *dest,
     info->fb_width      = gs->fb_width;
     info->fb_height     = gs->fb_height;
     info->caps          = 0;
+    info->vs3_handle         = gs->virgl_2d_vs3;
+    info->fs_modulate_handle = gs->virgl_2d_fs_modulate;
+    info->fs_decal_handle    = gs->virgl_2d_fs_decal;
+    info->fs_blend_handle    = gs->virgl_2d_fs_blend;
+    info->ve3_handle         = gs->virgl_2d_ve3;
 
     DCHIP("v3d: ObtainContext -> ctx=%lu vbuf=%lu scanout=%lu vs=%lu fs=%lu "
           "ve=%lu %lux%lu",

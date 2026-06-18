@@ -193,6 +193,14 @@ static uint32 hw_dispatch(long slot, uint32 a, uint32 b, uint32 c, uint32 d, uin
      * return == 5 to treat the format as supported (else W3D_UNSUPPORTEDFMT -18).
      * Return 5 to claim support. */
     case 19: ret = 5;      break;
+    /* slot18 (off 0x94) = the [0x94] driver-id the FE stores in Drivers[] at
+     * registration (ghidra_fe5327.txt:4814/4825).  CreateContext's primary select
+     * (line 756-776) matches GFXdriver [0x58]'s return against Drivers[]; ONLY that
+     * matched path sets ctx+0xd0 (the TMU-caps gate for SetTextureBlend).  Return a
+     * unique non-1 id (2) and have our GFX driver's [0x58] return the same 2, so the
+     * match hits OUR driver -> ctx+0xd0 = DAT_0x1aebc[our] = vector0(8) > 4.  (!=1 so
+     * Warp3D_Init doesn't drop us as a CPU driver.) */
+    case 18: ret = 2;      break;
     /* slot23 (off 0xa8) is the format-support query the cow's CreateContext
      * actually hammers (format ids 0x6f-0x72,0x14-0x17 + destfmt); the loop
      * needs == 5 to treat the format as supported (else -18 UNSUPPORTEDFMT). */

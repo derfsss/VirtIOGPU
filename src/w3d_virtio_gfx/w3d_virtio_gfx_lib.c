@@ -131,7 +131,19 @@ static uint32 gfx_s5(APTR Self, uint32 a, uint32 b, uint32 c, uint32 d)
     }
     return 0;
 }
-GFXSTUB(2)  GFXSTUB(3)  GFXSTUB(4)  GFXSTUB(6)  GFXSTUB(7)
+/* vec3 (off 0x58) = the GFX driver's bitmap->driver-id lookup.  The FE's
+ * CreateContext (ghidra_fe5327.txt:756) calls it and matches the return against
+ * the HW drivers' Drivers[] ids; ONLY a match sets ctx+0xd0 (TMU-caps gate for
+ * SetTextureBlend).  Return our HW driver's id (2, == its slot18/[0x94] return)
+ * so the match selects us via the primary path that sets ctx+0xd0, not the
+ * fallback (which leaves ctx+0xd0 <=4 -> SetTextureBlend -30). */
+static uint32 gfx_s3(APTR Self, uint32 a, uint32 b, uint32 c, uint32 d)
+{
+    (void)Self; (void)a; (void)b; (void)c; (void)d;
+    DBP("vec 3 (off 0x58) bitmap=%08lx -> driver-id 2\n", (unsigned long)a);
+    return 2;
+}
+GFXSTUB(2)  GFXSTUB(4)  GFXSTUB(6)  GFXSTUB(7)
 GFXSTUB(8)  GFXSTUB(9)  GFXSTUB(10) GFXSTUB(11) GFXSTUB(12) GFXSTUB(13)
 GFXSTUB(14) GFXSTUB(15) GFXSTUB(16) GFXSTUB(17) GFXSTUB(18) GFXSTUB(19)
 GFXSTUB(20) GFXSTUB(21) GFXSTUB(22) GFXSTUB(23)

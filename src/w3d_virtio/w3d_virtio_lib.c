@@ -240,7 +240,7 @@ HWSTUB(30) HWSTUB(31) HWSTUB(32) HWSTUB(33) HWSTUB(34) HWSTUB(35) HWSTUB(36) HWS
 HWSTUB(40) HWSTUB(41) HWSTUB(42) HWSTUB(43) HWSTUB(44) HWSTUB(45) HWSTUB(46) HWSTUB(47) HWSTUB(48) HWSTUB(49)
 HWSTUB(50) HWSTUB(51) HWSTUB(52) HWSTUB(53) HWSTUB(54) HWSTUB(55) HWSTUB(56) HWSTUB(57) HWSTUB(58) HWSTUB(59)
 HWSTUB(60) HWSTUB(61) HWSTUB(62) HWSTUB(63) HWSTUB(64) HWSTUB(65) HWSTUB(66) HWSTUB(67) HWSTUB(68) HWSTUB(69)
-HWSTUB(70) HWSTUB(71) HWSTUB(72) HWSTUB(73) HWSTUB(74) HWSTUB(75) HWSTUB(76) HWSTUB(77) HWSTUB(78) HWSTUB(79)
+HWSTUB(70) HWSTUB(71) HWSTUB(72) HWSTUB(73) HWSTUB(74) HWSTUB(75) HWSTUB(76) HWSTUB(77) HWSTUB(78)
 HWSTUB(80) HWSTUB(81) HWSTUB(82) HWSTUB(83) HWSTUB(84) HWSTUB(85) HWSTUB(86) HWSTUB(87)
 
 /* The FE's Warp3D_Init registration self-test calls slots 4 (AllocZBuffer) and
@@ -263,6 +263,46 @@ static uint32 hw_ClearDrawRegion(APTR Self, W3D_Context *ctx, uint32 color)
 {
     if (!ctx_ok(ctx)) return (uint32)(APTR)g_dummy_state;  /* registration: non-NULL */
     return w3d_ClearDrawRegion((struct Warp3DIFace *)Self, ctx, color);
+}
+
+/* Lazy per-context virgl state: the FE creates the W3D_Context itself and does
+ * NOT dispatch CreateContext (slot9) to us, so ctx->driver (the W3DVirgl 'wv') is
+ * never set up.  Create it on first array/draw op for a ctx, via the proven
+ * w3d_CreateContextTags path (W3D_CC_BITMAP = ctx->drawregion), and stash it in
+ * ctx->driver.  Returns NULL if the ctx is bogus or creation fails. */
+static APTR get_wv(W3D_Context *ctx)
+{
+    uint32 err = 0;
+    W3D_Context *inner;
+    if (!ctx_ok(ctx)) return 0;          /* bogus/registration ctx -> no wv      */
+    if (ctx->driver) return ctx->driver; /* already created                       */
+    inner = w3d_CreateContextTags((struct Warp3DIFace *)0, &err,
+                W3D_CC_BITMAP, (uint32)(APTR)ctx->drawregion, TAG_DONE);
+    if (!inner) return 0;
+    if (!inner->driver) { IExec->FreeVec(inner); return 0; }
+    ctx->driver   = inner->driver;       /* take the W3DVirgl                     */
+    ctx->width    = inner->width;
+    ctx->height   = inner->height;
+    inner->driver = 0;
+    IExec->FreeVec(inner);
+    DBP("get_wv: lazy ctx=%08lx driver=%08lx %ldx%ld\n", (unsigned long)(APTR)ctx,
+        (unsigned long)(APTR)ctx->driver, (long)ctx->width, (long)ctx->height);
+    return ctx->driver;
+}
+
+/* slot 79 (off 0x188) = the cow's W3D_InterleavedArray (FE decomposes its high-level
+ * InterleavedArray to this backend primitive).  Runtime args match: (Self, ctx,
+ * vtxptr, stride==40==sizeof(WARPPOINT), format, flags).  Ensure wv exists, then
+ * stash the array via the proven render core (does NOT draw -> safe). */
+static uint32 hw_s79(APTR Self, W3D_Context *ctx, void *p, uint32 stride,
+                     uint32 format, uint32 flags)
+{
+    (void)Self;
+    DBP("slot 79 InterleavedArray ctx=%08lx p=%08lx stride=%ld fmt=%08lx flags=%08lx\n",
+        (unsigned long)(APTR)ctx, (unsigned long)p, (long)stride,
+        (unsigned long)format, (unsigned long)flags);
+    if (!get_wv(ctx)) return 0;
+    return w3d_InterleavedArray((struct Warp3DIFace *)0, ctx, p, (int)stride, format, flags);
 }
 
 static const APTR _main_Vectors[] __attribute__((used)) =

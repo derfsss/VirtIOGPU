@@ -2147,3 +2147,43 @@ Cleared the whole gate chain and got the cow drawing through the stock Warp3D FE
 | Version | Phase | Objective |
 |---------|-------|-----------|
 | v54.x | Phase 6 | Warp3D.library on virgl (Wazp3D-derived) + MiniGL |
+
+## W3D_VirtIOGPU HW backend — cow renders fully + stub pass — 18.06.2026
+
+**Phase 8 Part B: the CoW3D6 Warp3D demo renders fully through the STOCK
+Warp3D.library 53.27 + our W3D_VirtIO GFX driver + W3D_VirtIOGPU HW backend** —
+geometry, depth, cow-hide texture, correct colours, no trails, animating.
+
+### The unlock — base-60 iface header
+
+The W3DHWIFace header is **60 bytes, not 76**: backend slot index =
+`(FE_dispatch_off - 60)/4` == the C-array index in `_main_Vectors[]`. Every prior
+base-76 wiring was off by 4. Validated byte-for-byte against the real `W3D_R200.library`
+(staged in `tmp_re/ref_drivers/`). Working slot map: DrawElements@73,
+InterleavedArray@79, ClearBuffers@80, SetState/Query-mux@23 (2048 for maxtex selectors
+0x6f-0x72), SetBlendMode@29, SetZCompareMode@37, texture-realize@38, FlushFrame@62,
+BindTexture@75, AllocZBuffer@8, CheckIdle@5. The FE tracks state itself (W3D bits in
+ctx+0x1c read per-draw; texenv mode in ctx->globaltexenvmode).
+
+### Render fixes
+
+- Real PI mesh indices via DrawElements@73 (not slot76's submit counter).
+- Per-frame COLOR+DEPTH clear @80 (fixed the depth-cull "blobs").
+- `ndc_y = 2y/fbh - 1` (un-flip; backend present blit is not Y-flipped).
+- 640×480 RT viewport emitted per draw (was inheriting the chip's 1280×800 scanout → ~2× oversize).
+- Texture maxtex query @23 → 2048 (the FE's W3D_AllocTexObj w/h gate).
+- Texture colour: reversed sampler swizzle ALPHA,BLUE,GREEN,RED in chip_v3d.c (the shared 32bpp uploader GP32-swaps RGBA→ABGR).
+
+### Stub pass ("implement all w3d stubs")
+
+- **BATCH A** — wired all immediate/array/texture stubs to the render core
+  (DrawTriangle/TriStrip/TriFan, DrawArray, Vertex/Color/TexCoordPointer,
+  UploadTexture, FreeTexObj, Lock/UnLock/SetDrawRegion).
+- **BATCH C** — rare ops (stencil/fog/logic/lines/ReadZ/WriteZ/chroma/anisotropy)
+  as safe accept-stubs.
+- **W3D_SetTexEnv combine (MODULATE/DECAL/BLEND)** — implemented (chip TGSI 3-attr
+  VS+FS+VE3+SET_CONSTANT_BUFFER) but **REVERTED** (commit 2b2bc58): regressed the cow
+  to a grey window + frozen Workbench (drew+presented 5345 frames but the screen never
+  refreshed). Preserved in history (b1ea0e4, 10ca47a) to re-apply after diagnosis.
+- Load-bearing stubs left as-is (re-wiring broke things): SetTextureBlend@76 no-op,
+  18→2 / 19→5 GFX handshake, 61 registration probe, GFX board-id stub @ slot 7.

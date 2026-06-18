@@ -148,6 +148,7 @@ uint32       w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx, uint32
 W3D_Texture *w3d_AllocTexObj(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 *error, struct TagItem *tags);
 W3D_Texture *w3d_AllocTexObjTags(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 *error, ...);
 void         w3d_FreeTexObj(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Texture *tex);
+uint32       w3d_RealizeTexture(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Texture *tex);
 uint32       w3d_BindTexture(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 tmu, W3D_Texture *tex);
 
 #endif /* WARP3D_INTERNAL_H */

@@ -398,6 +398,25 @@ static uint32 hw_Clear80(APTR Self, W3D_Context *ctx, uint32 b, uint32 c, uint32
     return w3d_ClearDrawRegion((struct Warp3DIFace *)0, ctx, 0xFF000000);
 }
 
+/* Texture slots (base 60).  The stock FE's W3D_AllocTexObj builds + fills the
+ * W3D_Texture itself, then drives the backend via four ctx+0xc0 dispatches, each
+ * checked ==0: realize/upload @off 0xd4 (idx 38), filter @0xb4 (30), env @0xc8
+ * (35), wrap @0xcc (32).  Only the realize does real work; the others must just
+ * return success or the FE aborts with "Cant create wtexture". */
+static uint32 hw_TexRealize(APTR Self, W3D_Context *ctx, W3D_Texture *tex,
+                            uint32 zero, uint32 maxmip)
+{
+    (void)Self; (void)zero; (void)maxmip;
+    if (!get_wv(ctx)) return (uint32)W3D_ILLEGALINPUT;
+    return w3d_RealizeTexture((struct Warp3DIFace *)0, ctx, tex);
+}
+static uint32 hw_TexAccept(APTR Self, W3D_Context *ctx, W3D_Texture *tex,
+                           uint32 a, uint32 b, uint32 c)
+{
+    (void)Self; (void)ctx; (void)tex; (void)a; (void)b; (void)c;
+    return 0;   /* W3D_SUCCESS -- filter/env/wrap defaults are fine */
+}
+
 static const APTR _main_Vectors[] __attribute__((used)) =
 {
     (APTR)_main_Obtain,   /* slot 0  Obtain  */
@@ -422,10 +441,15 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)hw_DestroyContext,/* 24 DestroyContext */
     (APTR)hw_s25,           /* 25 (SetBlendMode is idx 29 at base 60) */
     (APTR)hw_s26, (APTR)hw_s27, (APTR)hw_s28, (APTR)w3d_SetBlendMode, /* 29 SetBlendMode (base 60) */
-    (APTR)hw_s30, (APTR)hw_s31, (APTR)hw_s32, (APTR)hw_s33, (APTR)hw_s34, (APTR)hw_s35,
+    (APTR)hw_TexAccept, /* 30 tex filter (AllocTexObj sub-call, off 0xb4) */
+    (APTR)hw_s31,
+    (APTR)hw_TexAccept, /* 32 tex wrap (off 0xcc) */
+    (APTR)hw_s33, (APTR)hw_s34,
+    (APTR)hw_TexAccept, /* 35 tex env / SetTexEnv (off 0xc8) */
     (APTR)hw_s36, /* 36 (was DrawTriStrip: mis-mapped) */
     (APTR)hw_SetZCompare, /* 37 SetZCompareMode (base 60, off 208) */
-    (APTR)hw_s38, (APTR)hw_s39,
+    (APTR)hw_TexRealize, /* 38 texture realize/upload (AllocTexObj, off 0xd4) */
+    (APTR)hw_s39,
     (APTR)hw_s40, (APTR)hw_s41, (APTR)hw_s42, (APTR)hw_s43, (APTR)hw_s44, (APTR)hw_s45,
     (APTR)hw_s46, (APTR)hw_s47, (APTR)hw_s48, (APTR)hw_s49, (APTR)hw_s50, (APTR)hw_s51,
     (APTR)hw_s52, (APTR)hw_s53, (APTR)hw_s54, (APTR)hw_s55, (APTR)hw_s56,

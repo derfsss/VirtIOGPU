@@ -905,6 +905,51 @@ uint32 w3d_BindTexture(struct Warp3DIFace *Self, W3D_Context *ctx,
     return W3D_SUCCESS;
 }
 
+/* Realize a FE-built W3D_Texture.  The stock Warp3D.library FE allocates+fills
+ * the W3D_Texture itself (parses the ATO tags into texsource/texwidth/texheight)
+ * then calls the backend's off-0xd4 slot to UPLOAD it -- it never calls a tag-
+ * taking backend create.  So this reads the struct fields (vs w3d_AllocTexObj
+ * which reads tags) and uploads as R8G8B8A8, stashing {res,view} in tex->driver
+ * (which w3d_BindTexture + draw_elements_chunk read).  Returns W3D_SUCCESS(0). */
+uint32 w3d_RealizeTexture(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Texture *tex)
+{
+    struct W3DTexInfo *ti;
+    struct W3DVirgl   *wv;
+    APTR   image;
+    uint32 w, h;
+    (void)Self;
+
+    if (!ctx || !ctx->driver || !tex) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    if (tex->driver) return W3D_SUCCESS;        /* already realized -- idempotent */
+
+    image = tex->texsource;
+    w     = (uint32)tex->texwidth;
+    h     = (uint32)tex->texheight;
+    DW3D("RealizeTexture: tex=%p image=%p %lux%lu\n", (void *)tex, image,
+         (unsigned long)w, (unsigned long)h);
+    if (!image || !w || !h) return W3D_ILLEGALINPUT;
+
+    ti = IExec->AllocVecTags(sizeof(struct W3DTexInfo),
+                             AVT_Type, MEMF_PRIVATE, AVT_ClearWithValue, 0, TAG_DONE);
+    if (!ti) return W3D_NOMEMORY;
+
+    /* Cow textures are 32bpp RGBA RAW -> R8G8B8A8 (chip GP32 swap handles BE/LE). */
+    if (!g_IV3D->CreateTexture(g_IV3D, wv->info.token, w, h, image, w * 4,
+                               &ti->view, &ti->res)) {
+        DW3D("RealizeTexture: CreateTexture failed %lux%lu\n",
+             (unsigned long)w, (unsigned long)h);
+        IExec->FreeVec(ti);
+        return W3D_NOMEMORY;
+    }
+    ti->w = w; ti->h = h;
+    tex->driver = ti;
+    DW3D("RealizeTexture: OK %lux%lu res=%lu view=%lu\n",
+         (unsigned long)w, (unsigned long)h,
+         (unsigned long)ti->res, (unsigned long)ti->view);
+    return W3D_SUCCESS;
+}
+
 /* ----------------------------------------------------------------------- */
 /* W3D_InterleavedArray + W3D_DrawElements -- the cow demo's OS4 draw path.   */
 /* Position is always 3 floats at offset 0; remaining attributes follow in    */
@@ -936,7 +981,7 @@ uint32 w3d_InterleavedArray(struct Warp3DIFace *Self, W3D_Context *ctx,
     else if (format & W3D_VFORMAT_PACK_COLOR) { off += 4; }  /* packed RGBA -- unsupported colour for now */
     if (format & W3D_VFORMAT_SCOLOR)     off += 16;
     else if (format & W3D_VFORMAT_PACK_SCOLOR) off += 4;
-    if (format & W3D_VFORMAT_TCOORD_0)   { wv->ia_has_tcoord = TRUE; wv->ia_tcoord_off = off; off += 8; }
+    if (format & W3D_VFORMAT_TCOORD_0)   { wv->ia_has_tcoord = TRUE; wv->ia_tcoord_off = off; off += 12; } /* u,v,w = 3 floats (SDK), not 8 */
 
     return W3D_SUCCESS;
 }

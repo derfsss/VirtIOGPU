@@ -128,16 +128,9 @@ static uint32 gfx_s5(APTR Self, uint32 a, uint32 b, uint32 c, uint32 d)
         *(volatile uint32 *)(a + 0x24) = 0xFFFFFFFF;          /* supportedfmt=all */
         if (*(volatile uint32 *)(a + 0x28) == 0)
             *(volatile uint32 *)(a + 0x28) = 0x00000001;      /* format non-zero  */
-        /* Max texture dims (W3D_Context: maxtexwidth=0x68, maxtexheight=0x6c,
-         * maxtexwidthp=0x70, maxtexheightp=0x74; W3D_Bool=2B so these offsets).
-         * The FE's W3D_AllocTexObj rejects a texture whose w/h exceed these
-         * (it checks w<=ctx[0x68], h<=ctx[0x6c]) -- left 0 they fail every
-         * texture (the cow's 256x256 -> "Cant create wtexture" before the
-         * upload dispatch).  virgl/host GL handles >=2048. */
-        *(volatile uint32 *)(a + 0x68) = 2048;                /* maxtexwidth   */
-        *(volatile uint32 *)(a + 0x6c) = 2048;                /* maxtexheight  */
-        *(volatile uint32 *)(a + 0x70) = 2048;                /* maxtexwidthp  */
-        *(volatile uint32 *)(a + 0x74) = 2048;                /* maxtexheightp */
+        /* (maxtexwidth/height are NOT set here: the FE's CreateContext overwrites
+         * ctx[0x68..0x74] from the HW backend's query vector (off 0x98) AFTER this
+         * vec5 runs -- so the max-tex caps are answered there, not here.) */
     }
     return 0;
 }

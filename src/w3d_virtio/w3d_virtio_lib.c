@@ -367,6 +367,14 @@ static uint32 hw_SetStateFn(APTR Self, W3D_Context *ctx, uint32 state, uint32 ac
     (void)Self;
     if (!get_wv(ctx)) return 0;
     *(volatile uint32 *)((UBYTE *)ctx + 0xd0) = 8;
+    /* This vector (off 0x98 = idx 23) is MULTIPLEXED: the FE routes both W3D_SetState
+     * AND the CreateContext caps query through it.  For the max-texture queries it
+     * passes state=0x6f..0x72 (W3D_Q_MAXTEXWIDTH/HEIGHT/_P) and writes our return into
+     * ctx maxtexwidth/height (0x68/0x6c/0x70/0x74).  Report 2048 so W3D_AllocTexObj's
+     * "w/h <= max" check passes -- else every texture fails before the upload dispatch
+     * (the cow's 256x256 -> "Cant create wtexture").  (W3D states are small values, no
+     * overlap with the 0x6f..0x72 query selectors.) */
+    if (state >= 0x6f && state <= 0x72) return 2048;
     return w3d_SetState((struct Warp3DIFace *)0, ctx, state, action);
 }
 /* SetZCompareMode(ctx, mode) at off 208 (idx 37): the render core's DSA is already

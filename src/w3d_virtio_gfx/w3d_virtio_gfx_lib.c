@@ -140,13 +140,17 @@ static uint32 gfx_s5(APTR Self, uint32 a, uint32 b, uint32 c, uint32 d)
  * SetTextureBlend).  Return our HW driver's id (2, == its slot18/[0x94] return)
  * so the match selects us via the primary path that sets ctx+0xd0, not the
  * fallback (which leaves ctx+0xd0 <=4 -> SetTextureBlend -30). */
-static uint32 gfx_s3(APTR Self, uint32 a, uint32 b, uint32 c, uint32 d)
+/* GFX vec 7 (off 0x58) = the FE's board-id / driver-match lookup (ghidra
+ * CreateContext calls IW3DGFX+0x58 = base-60 slot 7).  Returning our driver-id
+ * here lets the FE select us via the PRIMARY Drivers[] match path (which sets
+ * ctx+0xd0 itself) instead of the no-match fallback.  (Was mis-placed at vec 3.) */
+static uint32 gfx_s7(APTR Self, uint32 a, uint32 b, uint32 c, uint32 d)
 {
     (void)Self; (void)a; (void)b; (void)c; (void)d;
-    DBP("vec 3 (off 0x58) bitmap=%08lx -> driver-id 2\n", (unsigned long)a);
+    DBP("vec 7 (off 0x58) bitmap=%08lx -> driver-id 2\n", (unsigned long)a);
     return 2;
 }
-GFXSTUB(2)  GFXSTUB(4)  GFXSTUB(6)  GFXSTUB(7)
+GFXSTUB(2)  GFXSTUB(3)  GFXSTUB(4)  GFXSTUB(6)
 GFXSTUB(8)  GFXSTUB(9)  GFXSTUB(10) GFXSTUB(11) GFXSTUB(12) GFXSTUB(13)
 GFXSTUB(14) GFXSTUB(15) GFXSTUB(16) GFXSTUB(17) GFXSTUB(18) GFXSTUB(19)
 GFXSTUB(20) GFXSTUB(21) GFXSTUB(22) GFXSTUB(23)

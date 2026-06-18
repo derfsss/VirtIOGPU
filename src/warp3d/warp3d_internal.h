@@ -55,9 +55,14 @@ struct W3DVirgl {
     uint32 draw_idx;                /* which buffer we currently draw into */
     BOOL   drawn_since_clear;       /* geometry submitted since last frame clear */
 
-    /* Shared depth buffer + depth-test DSA (for correct occlusion). */
+    /* Shared depth buffer + depth-test DSA (for correct occlusion).  Three DSA
+     * variants are pre-created so W3D_SetState(ZBUFFER/ZBUFFERUPDATE) can toggle
+     * depth test/write per draw (e.g. the cow's 2D blended overlay disables Z so
+     * it composites over the scene). */
     uint32 zres, zsurf;             /* depth resource + surface (0 = none) */
-    uint32 dsa_handle;              /* depth-test DSA object handle */
+    uint32 dsa_handle;              /* base DSA handle (test+write, == DSA_TW) */
+    BOOL   depth_test;              /* W3D_ZBUFFER       (default TRUE) */
+    BOOL   depth_write;             /* W3D_ZBUFFERUPDATE (default TRUE) */
 
     /* Currently bound texture (TMU 0), NULL = untextured (colour) draws. */
     W3D_Texture *cur_tex;

@@ -218,9 +218,12 @@ static void bind_rt_framebuffer(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
     virgl_cmd_set_viewport(cbuf, 0, hw, hh, 0.5f, hw, hh, 0.5f);
     /* scissor >= RT so it never clips (the chip left it at scanout size) */
     virgl_cmd_set_scissor_state(cbuf, 0, 0, 0, wv->fb_w, wv->fb_h);
-    /* bind our depth-test DSA (the chip's default DSA has depth off) */
+    /* bind the DSA matching the app's W3D_ZBUFFER/ZBUFFERUPDATE state:
+     * 300=test+write, 301=test+no-write, 302=depth off.  (302 lets a 2D blended
+     * overlay -- e.g. the cow's Cosmos pass -- composite over the scene.) */
     if (wv->dsa_handle)
-        virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_DSA, wv->dsa_handle);
+        virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_DSA,
+            wv->depth_test ? (wv->depth_write ? 300 : 301) : 302);
     /* bind blend state (opaque, or the app's W3D_SetBlendMode factors) */
     bind_blend(cbuf, wv);
 }
@@ -406,14 +409,22 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
 
     /* Shared depth buffer + a depth-test DSA (LESS, write enabled) so the cow
      * surfaces occlude correctly regardless of triangle draw order. */
+    wv->depth_test = TRUE; wv->depth_write = TRUE;
     if (g_IV3D->AllocDepthBuffer(g_IV3D, wv->info.token, wv->fb_w, wv->fb_h,
                                  &wv->zres, &wv->zsurf)) {
-        uint32 dw[16]; struct VirglCmdBuf dcb;
+        uint32 dw[48]; struct VirglCmdBuf dcb;
         wv->dsa_handle = 300;       /* warp3d object handle range (>= chip's) */
-        virgl_cmd_init(&dcb, dw, 16);
-        virgl_cmd_create_dsa(&dcb, wv->dsa_handle,
+        virgl_cmd_init(&dcb, dw, 48);
+        /* 300 = test+write (LESS), 301 = test, no write, 302 = depth OFF.
+         * bind_rt_framebuffer picks one per draw from depth_test/depth_write. */
+        virgl_cmd_create_dsa(&dcb, 300,
             VIRGL_DSA_S0_DEPTH_ENABLE(1) | VIRGL_DSA_S0_DEPTH_WRITEMASK(1) |
             VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_LESS), 0, 0, 0.0f);
+        virgl_cmd_create_dsa(&dcb, 301,
+            VIRGL_DSA_S0_DEPTH_ENABLE(1) | VIRGL_DSA_S0_DEPTH_WRITEMASK(0) |
+            VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_LESS), 0, 0, 0.0f);
+        virgl_cmd_create_dsa(&dcb, 302,
+            VIRGL_DSA_S0_DEPTH_ENABLE(0), 0, 0, 0.0f);   /* depth test off */
         g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id, dcb.buf, dcb.dwords);
     }
 
@@ -574,12 +585,18 @@ uint32 w3d_GetState(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 state)
 uint32 w3d_SetState(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 state, uint32 action)
 {
     struct W3DVirgl *wv;
+    BOOL en;
     (void)Self;
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
-    if (action) wv->state |= state; else wv->state &= ~state;
+    /* action is W3D_ENABLE(1) or W3D_DISABLE(2) -- NOT a 0/1 bool, so the old
+     * `if (action)` treated DISABLE(2) as enable (blending/depth stuck on). */
+    en = (action == W3D_ENABLE);
+    if (en) wv->state |= state; else wv->state &= ~state;
     ctx->state = wv->state;
-    if (state & W3D_BLENDING) wv->blend_on = (action != 0);
+    if (state & W3D_BLENDING)      wv->blend_on    = en;
+    if (state & W3D_ZBUFFER)       wv->depth_test  = en;  /* toggle depth-test DSA  */
+    if (state & W3D_ZBUFFERUPDATE) wv->depth_write = en;  /* toggle depth-write DSA */
     return W3D_SUCCESS;
 }
 

@@ -239,7 +239,7 @@ HWSTUB(20) HWSTUB(21) HWSTUB(22) HWSTUB(23) HWSTUB(24) HWSTUB(25) HWSTUB(26) HWS
 HWSTUB(30) HWSTUB(31) HWSTUB(32) HWSTUB(33) HWSTUB(34) HWSTUB(35) HWSTUB(36) HWSTUB(37) HWSTUB(38) HWSTUB(39)
 HWSTUB(40) HWSTUB(41) HWSTUB(42) HWSTUB(43) HWSTUB(44) HWSTUB(45) HWSTUB(46) HWSTUB(47) HWSTUB(48) HWSTUB(49)
 HWSTUB(50) HWSTUB(51) HWSTUB(52) HWSTUB(53) HWSTUB(54) HWSTUB(55) HWSTUB(56) HWSTUB(57) HWSTUB(58) HWSTUB(59)
-HWSTUB(60) HWSTUB(61) HWSTUB(62) HWSTUB(63) HWSTUB(64) HWSTUB(65) HWSTUB(66) HWSTUB(67) HWSTUB(68) HWSTUB(69)
+HWSTUB(60) HWSTUB(61) HWSTUB(62) HWSTUB(63) HWSTUB(64) HWSTUB(65) HWSTUB(66) HWSTUB(67) HWSTUB(68)
 HWSTUB(70) HWSTUB(71) HWSTUB(72) HWSTUB(73) HWSTUB(74) HWSTUB(75) HWSTUB(77) HWSTUB(78)
 HWSTUB(80) HWSTUB(81) HWSTUB(82) HWSTUB(83) HWSTUB(84) HWSTUB(85) HWSTUB(86) HWSTUB(87)
 
@@ -296,40 +296,13 @@ static APTR get_wv(W3D_Context *ctx)
     return ctx->driver;
 }
 
-/* slot 76 is OVERLOADED (gdb-confirmed): c!=0 -> a depth/Z state op where b,c point
- * to two doubles (e.g. 0.0, 0.9); c==0 -> the DRAW path where b points to a ULONG
- * vertex-index stream (triangle list).  Instrument both to decode the draw protocol
- * via the ring: when c==0 dump the first 6 indices at b (2 triangles) so we learn
- * the index count/format per call.  (RAM-guard b before deref.) */
-/* Accumulated triangle-strip vertex indices (the FE submits one per slot76 call,
- * the strip ends with b==0).  Single-threaded enough for the cow. */
-#define STRIP_MAX 16384
-static uint32 g_strip[STRIP_MAX];
-static uint32 g_strip_n = 0;
-
+/* slot 76 is NOT the cow's draw -- the real DrawElements is slot 69 (the FE thunks
+ * to it with the genuine PI indices).  slot76's c==0 path carried only a sequential
+ * submit counter (word1), and c!=0 is a depth/Z state op; emitting from it drew the
+ * 2914 verts in submission order = the distorted spikes.  No-op it; slot 69 draws. */
 static uint32 hw_s76(APTR Self, W3D_Context *ctx, uint32 b, uint32 c, uint32 d)
 {
-    (void)Self; (void)d;
-    /* c != 0 -> a depth/Z state op (b,c = double ptrs); not a draw. */
-    if (c != 0) return 0;
-    if (b >= 0x10000000 && b < 0x80000000) {
-        /* extend the strip with this vertex index (word1 = *(b+4)). */
-        uint32 idx = *(const volatile uint32 *)(b + 4);
-        if (idx < 0x100000 && g_strip_n < STRIP_MAX)   /* sane index guard */
-            g_strip[g_strip_n++] = idx;
-        return 0;
-    }
-    /* b == 0 -> strip end: emit the accumulated strip as triangles, using the
-     * verts stashed by slot79 (InterleavedArray).  Present already works. */
-    if (g_strip_n >= 3 && get_wv(ctx)) {
-        /* The cow draws W3D_PRIMITIVE_TRIANGLES (a triangle LIST: every 3 indices
-         * = 1 triangle), NOT a strip -- drawing it as a strip zigzags into spikes. */
-        DBP("slot76 EMIT TRIANGLES n=%lu (idx0=%lu)\n",
-            (unsigned long)g_strip_n, (unsigned long)g_strip[0]);
-        w3d_DrawElements((struct Warp3DIFace *)0, ctx,
-            W3D_PRIMITIVE_TRIANGLES, W3D_INDEX_ULONG, g_strip_n, g_strip);
-    }
-    g_strip_n = 0;
+    (void)Self; (void)ctx; (void)b; (void)c; (void)d;
     return 0;
 }
 
@@ -346,6 +319,22 @@ static uint32 hw_s79(APTR Self, W3D_Context *ctx, void *p, uint32 stride,
         (unsigned long)format, (unsigned long)flags);
     if (!get_wv(ctx)) return 0;
     return w3d_InterleavedArray((struct Warp3DIFace *)0, ctx, p, (int)stride, format, flags);
+}
+
+/* slot 69 (off 0x160) = the cow's REAL W3D_DrawElements.  The FE validates then
+ * thunks `(iface+0x160)(iface)` with ctx/prim/type/count/indices still live in
+ * r4-r8 (it doesn't reload them) -> we receive the genuine mesh indices (PI),
+ * unlike slot76's sequential submit counter.  Forward to the render core, which
+ * gathers verts from the slot79-stashed InterleavedArray by these indices. */
+static uint32 hw_s69(APTR Self, W3D_Context *ctx, uint32 prim, uint32 type,
+                     uint32 count, void *indices)
+{
+    (void)Self;
+    if (!get_wv(ctx)) return (uint32)W3D_ILLEGALINPUT;
+    DBP("slot69 DrawElements prim=%lu type=%lu count=%lu idx=%08lx\n",
+        (unsigned long)prim, (unsigned long)type, (unsigned long)count,
+        (unsigned long)indices);
+    return w3d_DrawElements((struct Warp3DIFace *)0, ctx, prim, type, count, indices);
 }
 
 static const APTR _main_Vectors[] __attribute__((used)) =

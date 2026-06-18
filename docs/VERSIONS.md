@@ -2095,6 +2095,29 @@ apps work, not just via the custom warp3d.library.
   port the proven virgl render core into the draw slots; A/B against Wazp3D; retire
   the custom warp3d.library. Detail in the `reference-warp3d-driver-model` memory.
 
+## W3D_VirtIOGPU HW backend + W3D_VirtIO GFX driver — Phase 8 Part B (18.06.2026)
+
+Built BOTH a Warp3D V5 HW backend (`src/w3d_virtio/`, LIBS:Warp3D/HWdrivers/) and
+our own GFX driver (`src/w3d_virtio_gfx/`, LIBS:Warp3D/GFXdrivers/) under the stock
+Warp3D.library FE 53.27, so real Warp3D apps (cow demo = acceptance test) run
+without our custom warp3d.library.
+
+- **Selection solved**: stock W3D_Picasso96 gates HW selection by a board-name
+  allowlist excluding virtio. Our W3D_VirtIO GFX driver (vec5/off0x60 populates
+  ctx->supportedfmt) + moving Picasso96 aside advanced the cow's CreateContext
+  error -4 NODRIVER → -18 UNSUPPORTEDFMT → **SUCCESS**.
+- **Render core ported** into the HW backend (warp3d_main.c + chip_virgl.c
+  VIRGL_ENCODE_ONLY); all draw slots wired (13/36/37/62/63/64/68/69/75); a
+  registration-time DSI crash fixed (ctx_ok guard on slots 4/61); RT presented to
+  the window W3D_CC_BITMAP per-draw.
+- **Remaining blocker (1 gate)**: cow shows a grey window + zero draws — loops in
+  texture setup because W3D_SetTextureBlend returns -30 unless ctx+0xd0 > 4, and
+  ctx+0xd0 = the per-driver TMU/caps value from the FE registration table
+  (DAT_0x1aebc). Ours is ≤4 → fix = advertise TMU > 4 at REGISTRATION. Full FE
+  offsets in the `reference-warp3d-driver-model` memory.
+- Commits: 5453992 (port), 31bf723 (crash-fix), a9397c6 (draw slots), 6ee439a
+  (per-draw present). Guest: Picasso96 → .off in GFXdrivers/.
+
 ---
 
 ## Planned releases

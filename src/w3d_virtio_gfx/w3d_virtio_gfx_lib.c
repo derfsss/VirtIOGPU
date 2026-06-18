@@ -115,7 +115,23 @@ static uint32 gfx_OpenCtx(APTR Self, uint32 ctx, uint32 b, uint32 c, uint32 d)
     DBP("vec %ld (off 0x%lx) a=%08lx b=%08lx c=%08lx d=%08lx\n", (long)(n), \
         (unsigned long)(76+(n)*4), (unsigned long)a,(unsigned long)b, \
         (unsigned long)c,(unsigned long)d); return 0; }
-GFXSTUB(2)  GFXSTUB(3)  GFXSTUB(4)  GFXSTUB(5)  GFXSTUB(6)  GFXSTUB(7)
+/* vec5 (off 0x60) is the per-context setup that fires with arg1 = W3D_Context*
+ * (same ctx the format queries use) right BEFORE the FE's (format & supportedfmt)
+ * check.  vec1 (off 0x50) is NOT called by CreateContext (runtime-confirmed).
+ * Populate supportedfmt (0x24) + a non-zero format (0x28) here so the check
+ * passes.  Guard a as a RAM ctx pointer to avoid a bad-pointer DSI. */
+static uint32 gfx_s5(APTR Self, uint32 a, uint32 b, uint32 c, uint32 d)
+{
+    (void)Self; (void)b; (void)c; (void)d;
+    DBP("vec 5 (off 0x60) ctx=%08lx [setfmt]\n", (unsigned long)a);
+    if (a >= 0x10000000 && a < 0x80000000) {
+        *(volatile uint32 *)(a + 0x24) = 0xFFFFFFFF;          /* supportedfmt=all */
+        if (*(volatile uint32 *)(a + 0x28) == 0)
+            *(volatile uint32 *)(a + 0x28) = 0x00000001;      /* format non-zero  */
+    }
+    return 0;
+}
+GFXSTUB(2)  GFXSTUB(3)  GFXSTUB(4)  GFXSTUB(6)  GFXSTUB(7)
 GFXSTUB(8)  GFXSTUB(9)  GFXSTUB(10) GFXSTUB(11) GFXSTUB(12) GFXSTUB(13)
 GFXSTUB(14) GFXSTUB(15) GFXSTUB(16) GFXSTUB(17) GFXSTUB(18) GFXSTUB(19)
 GFXSTUB(20) GFXSTUB(21) GFXSTUB(22) GFXSTUB(23)

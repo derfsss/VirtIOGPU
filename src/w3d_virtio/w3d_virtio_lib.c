@@ -322,10 +322,12 @@ static uint32 hw_s76(APTR Self, W3D_Context *ctx, uint32 b, uint32 c, uint32 d)
     /* b == 0 -> strip end: emit the accumulated strip as triangles, using the
      * verts stashed by slot79 (InterleavedArray).  Present already works. */
     if (g_strip_n >= 3 && get_wv(ctx)) {
-        DBP("slot76 EMIT TRISTRIP n=%lu (idx0=%lu)\n",
+        /* The cow draws W3D_PRIMITIVE_TRIANGLES (a triangle LIST: every 3 indices
+         * = 1 triangle), NOT a strip -- drawing it as a strip zigzags into spikes. */
+        DBP("slot76 EMIT TRIANGLES n=%lu (idx0=%lu)\n",
             (unsigned long)g_strip_n, (unsigned long)g_strip[0]);
         w3d_DrawElements((struct Warp3DIFace *)0, ctx,
-            W3D_PRIMITIVE_TRISTRIP, W3D_INDEX_ULONG, g_strip_n, g_strip);
+            W3D_PRIMITIVE_TRIANGLES, W3D_INDEX_ULONG, g_strip_n, g_strip);
     }
     g_strip_n = 0;
     return 0;

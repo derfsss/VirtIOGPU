@@ -596,12 +596,13 @@ uint32 w3d_SetState(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 state, ui
     wv = ctx->driver;
     /* action is W3D_ENABLE(1) or W3D_DISABLE(2) -- NOT a 0/1 bool, so the old
      * `if (action)` treated DISABLE(2) as enable (blending/depth stuck on). */
+    /* NOTE: the FE's W3D_SetState does NOT pass the enable/disable to this backend
+     * vector -- it hands us a per-state selector (e.g. 0x29 for ZBUFFER) and records
+     * the actual bit in ctx+0x1c itself.  So we do NOT derive depth/blend here (that
+     * is read from ctx+0x1c per-draw in w3d_DrawElements) and must NOT write ctx->state
+     * (would clobber the FE's mirror).  Keep a local wv->state echo only. */
     en = (action == W3D_ENABLE);
     if (en) wv->state |= state; else wv->state &= ~state;
-    ctx->state = wv->state;
-    if (state & W3D_BLENDING)      wv->blend_on    = en;
-    if (state & W3D_ZBUFFER)       wv->depth_test  = en;  /* toggle depth-test DSA  */
-    if (state & W3D_ZBUFFERUPDATE) wv->depth_write = en;  /* toggle depth-write DSA */
     return W3D_SUCCESS;
 }
 
@@ -1117,7 +1118,20 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
 
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
-    DW3D("DrawElements: prim=%lu count=%lu\n", (unsigned long)prim, (unsigned long)count);
+    /* The FE tracks the live W3D state bits in ctx+0x1c (W3D_SetState only hands the
+     * backend a per-state selector, not the enable/disable -- that lives here).  Read
+     * it per-draw to drive the depth-test/write + blend DSA selection.  This is how
+     * the cow's 2D Cosmos overlay (W3D_ZBUFFER disabled) gets depth-off so it
+     * composites over the scene. */
+    if ((uint32)(APTR)ctx >= 0x10000000 && (uint32)(APTR)ctx < 0x80000000) {
+        uint32 fe = *(volatile uint32 *)((UBYTE *)ctx + 0x1c);
+        wv->depth_test  = (fe & W3D_ZBUFFER)       != 0;
+        wv->depth_write = (fe & W3D_ZBUFFERUPDATE) != 0;
+        wv->blend_on    = (fe & W3D_BLENDING)      != 0;
+    }
+    DW3D("DrawElements: prim=%lu count=%lu zt=%ld zw=%ld bl=%ld\n",
+        (unsigned long)prim, (unsigned long)count,
+        (long)wv->depth_test, (long)wv->depth_write, (long)wv->blend_on);
     if (!wv->ia_ptr || !indices || count == 0) return W3D_ILLEGALINPUT;
     if (!wv->cmdbuf) return W3D_NOMEMORY;
 

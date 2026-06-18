@@ -352,10 +352,13 @@ static uint32 hw_s79(APTR Self, W3D_Context *ctx, void *p, uint32 stride,
  * gathers verts from the slot79-stashed InterleavedArray by these indices. */
 /* idx 69 (base 60, off 0x150) = VertexPointer, NOT DrawElements (that's idx 73).
  * The cow uses InterleavedArray, not standalone VertexPointer -- no-op it. */
-static uint32 hw_s69(APTR Self, W3D_Context *ctx, uint32 a, uint32 b, uint32 c, uint32 d)
+/* idx 69 = W3D_VertexPointer (base 60): stash the vertex array for DrawArray. */
+static uint32 hw_VertexPointer(APTR Self, W3D_Context *ctx, void *p,
+                               uint32 stride, uint32 mode, uint32 flags)
 {
-    (void)Self; (void)ctx; (void)a; (void)b; (void)c; (void)d;
-    return 0;
+    (void)Self;
+    if (!get_wv(ctx)) return 0;
+    return w3d_VertexPointer((struct Warp3DIFace *)0, ctx, p, (int)stride, mode, flags);
 }
 
 /* ---- base-60 corrected state/clear handlers (FE leaves args r4=ctx, r5+=rest) --- */
@@ -425,6 +428,41 @@ static uint32 hw_TexAccept(APTR Self, W3D_Context *ctx, W3D_Texture *tex,
     return 0;   /* W3D_SUCCESS -- filter/env/wrap defaults are fine */
 }
 
+/* ---- BATCH A: wire remaining slots to the proven render core (base-60) ----
+ * All guard via get_wv (lazy ctx->driver create) so registration-probe calls with
+ * a bogus ctx don't DSI.  The cow doesn't use these (it draws via DrawElements@73 +
+ * InterleavedArray@79), so they're regression-safe; they enable general Warp3D/
+ * MiniGL apps that use immediate-mode + the array API. */
+static uint32 hw_DrawTriangle(APTR S, W3D_Context *ctx, W3D_Triangle *t)
+{ (void)S; if (!get_wv(ctx)) return (uint32)W3D_ILLEGALINPUT;
+  return w3d_DrawTriangle((struct Warp3DIFace *)0, ctx, t); }            /* idx 17 */
+static uint32 hw_DrawTriStrip(APTR S, W3D_Context *ctx, W3D_Triangles *t)
+{ (void)S; if (!get_wv(ctx)) return (uint32)W3D_ILLEGALINPUT;
+  return w3d_DrawTriStrip((struct Warp3DIFace *)0, ctx, t); }            /* idx 40 */
+static uint32 hw_DrawTriFan(APTR S, W3D_Context *ctx, W3D_Triangles *t)
+{ (void)S; if (!get_wv(ctx)) return (uint32)W3D_ILLEGALINPUT;
+  return w3d_DrawTriFan((struct Warp3DIFace *)0, ctx, t); }              /* idx 41 */
+static uint32 hw_DrawArray(APTR S, W3D_Context *ctx, uint32 prim, uint32 base, uint32 count)
+{ (void)S; if (!get_wv(ctx)) return (uint32)W3D_ILLEGALINPUT;
+  return w3d_DrawArray((struct Warp3DIFace *)0, ctx, prim, base, count); } /* idx 68/72 */
+static uint32 hw_ColorPointer(APTR S, W3D_Context *ctx, void *p, uint32 stride,
+                              uint32 fmt, uint32 mode, uint32 flags)
+{ (void)S; if (!get_wv(ctx)) return 0;
+  return w3d_ColorPointer((struct Warp3DIFace *)0, ctx, p, (int)stride, fmt, mode, flags); } /* idx 67 */
+static uint32 hw_TexCoordPointer(APTR S, W3D_Context *ctx, void *p, uint32 stride,
+                                 uint32 unit, uint32 flags)
+{ (void)S; (void)ctx; (void)p; (void)stride; (void)unit; (void)flags;
+  return 0; }   /* idx 66/70 -- accept until render-core array texcoord support (R4) */
+static uint32 hw_UploadTexture(APTR S, W3D_Context *ctx, W3D_Texture *tex)
+{ (void)S; if (!get_wv(ctx)) return (uint32)W3D_ILLEGALINPUT;
+  return w3d_RealizeTexture((struct Warp3DIFace *)0, ctx, tex); }        /* idx 14 */
+static uint32 hw_FreeTexObj(APTR S, W3D_Context *ctx, W3D_Texture *tex)
+{ (void)S; if (!ctx_ok(ctx)) return 0;
+  w3d_FreeTexObj((struct Warp3DIFace *)0, ctx, tex); return 0; }         /* idx 20 */
+static uint32 hw_LockHW(APTR S, W3D_Context *ctx)     { (void)S; (void)ctx; return 0; } /* 44 */
+static uint32 hw_UnLockHW(APTR S, W3D_Context *ctx)   { (void)S; (void)ctx; return 0; } /* 45 */
+static uint32 hw_SetDrawRegion(APTR S, W3D_Context *ctx){ (void)S; (void)ctx; return 0; } /* 58 */
+
 static const APTR _main_Vectors[] __attribute__((used)) =
 {
     (APTR)_main_Obtain,   /* slot 0  Obtain  */
@@ -442,9 +480,10 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)hw_CreateContext, /* 9  CreateContext */
     (APTR)hw_s10, (APTR)hw_s11, (APTR)hw_s12,
     (APTR)hw_s13,           /* 13 (was DrawTriangle: mis-mapped state op) */
-    (APTR)hw_s14, (APTR)hw_s15, (APTR)hw_s16, (APTR)hw_s17, (APTR)hw_s18,
+    (APTR)hw_UploadTexture, /* 14 */ (APTR)hw_s15, (APTR)hw_s16,
+    (APTR)hw_DrawTriangle,  /* 17 */ (APTR)hw_s18,
     (APTR)hw_s19,           /* 19 SetState/Query/format-query -> 5 (keep) */
-    (APTR)hw_s20, (APTR)hw_s21, (APTR)hw_s22,
+    (APTR)hw_FreeTexObj, /* 20 */ (APTR)hw_s21, (APTR)hw_s22,
     (APTR)hw_SetStateFn,    /* 23 SetState (base 60, off 152) + ctx+0xd0 poke */
     (APTR)hw_DestroyContext,/* 24 DestroyContext */
     (APTR)hw_s25,           /* 25 (SetBlendMode is idx 29 at base 60) */
@@ -458,24 +497,25 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)hw_SetZCompare, /* 37 SetZCompareMode (base 60, off 208) */
     (APTR)hw_TexRealize, /* 38 texture realize/upload (AllocTexObj, off 0xd4) */
     (APTR)hw_s39,
-    (APTR)hw_s40, (APTR)hw_s41, (APTR)hw_s42, (APTR)hw_s43, (APTR)hw_s44, (APTR)hw_s45,
+    (APTR)hw_DrawTriStrip, /* 40 */ (APTR)hw_DrawTriFan, /* 41 */ (APTR)hw_s42, (APTR)hw_s43,
+    (APTR)hw_LockHW, /* 44 LockHardware (ack) */ (APTR)hw_UnLockHW, /* 45 UnLockHardware (ack) */
     (APTR)hw_s46, (APTR)hw_s47, (APTR)hw_s48, (APTR)hw_s49, (APTR)hw_s50, (APTR)hw_s51,
     (APTR)hw_s52, (APTR)hw_s53, (APTR)hw_s54, (APTR)hw_s55, (APTR)hw_s56,
     (APTR)hw_s57,           /* 57 identify -> 0x48aa (keep) */
-    (APTR)hw_s58,           /* 58 (SetDrawRegion; FlushFrame is idx 62 at base 60) */
+    (APTR)hw_SetDrawRegion, /* 58 SetDrawRegion (ack; GFXdriver does the real lock) */
     (APTR)hw_s59, (APTR)hw_s60,
     (APTR)hw_s61,             /* 61 (clear is idx 65 at base 60) */
     (APTR)w3d_FlushFrame, /* 62 FlushFrame (base 60, off 308) */
     (APTR)hw_s63, /* 63 */
     (APTR)hw_s64,   /* 64 */
     (APTR)hw_Clear65,/* 65 ClearBuffers/ClearDrawRegion (base 60, off 320) -- DEPTH CLEAR */
-    (APTR)hw_s66,           /* 66 TexCoordPointer (stub: textures lag) */
-    (APTR)hw_s67, /* 67 (was ColorPointer: cow uses 79) */
-    (APTR)hw_s68,    /* 68 (was DrawArray: mis-mapped) */
-    (APTR)hw_s69,           /* 69 (was DrawElements: cow draws via 76/79/80) */
-    (APTR)hw_s70,
+    (APTR)hw_TexCoordPointer, /* 66 TexCoordPointer (accept; R4) */
+    (APTR)hw_ColorPointer,    /* 67 ColorPointer */
+    (APTR)hw_DrawArray,       /* 68 DrawArray */
+    (APTR)hw_VertexPointer,   /* 69 VertexPointer */
+    (APTR)hw_TexCoordPointer, /* 70 TexCoordPointer (accept; R4) */
     (APTR)hw_s71,           /* 71 (BindTexture is idx 75 at base 60) */
-    (APTR)hw_s72, (APTR)hw_s73, (APTR)hw_SetStateFn, /* 74 SetState (base 60, off 356) */
+    (APTR)hw_DrawArray, /* 72 DrawArray (high) */ (APTR)hw_s73, (APTR)hw_SetStateFn, /* 74 SetState */
     (APTR)w3d_BindTexture, /* 75 BindTexture (base 60, off 360) */
     (APTR)hw_s76, (APTR)hw_s77, (APTR)hw_s78, (APTR)hw_s79, (APTR)hw_Clear80, /* 80 ClearBuffers (ctx+0xd0>4 path, off 0x17c) */ (APTR)hw_s81,
     (APTR)hw_s82, (APTR)hw_s83, (APTR)hw_s84, (APTR)hw_s85, (APTR)hw_s86, (APTR)hw_s87,

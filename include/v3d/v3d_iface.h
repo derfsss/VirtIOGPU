@@ -40,13 +40,6 @@ struct V3DContextInfo {
     uint32 fb_width;       /* destination width  (pixels)                      */
     uint32 fb_height;      /* destination height (pixels)                      */
     uint32 caps;           /* reserved feature bits                            */
-    /* --- W3D_SetTexEnv combine pipeline (pos+texcoord+colour, stride 48);
-     *     any 0 => not available, backend falls back to REPLACE. Append-only. --- */
-    uint32 vs3_handle;         /* 3-attr passthrough VS                        */
-    uint32 fs_modulate_handle; /* W3D_MODULATE FS (texel * colour)             */
-    uint32 fs_decal_handle;    /* W3D_DECAL FS                                 */
-    uint32 fs_blend_handle;    /* W3D_BLEND FS (env colour in CONST[0])        */
-    uint32 ve3_handle;         /* 3-attr vertex elements (stride 48)           */
 };
 
 struct V3DIFace {

@@ -485,13 +485,6 @@ void virgl_setup_default_rasterizer(struct VirglCmdBuf *cbuf, uint32 handle);
 void virgl_setup_passthrough_vs(struct VirglCmdBuf *cbuf, uint32 handle);
 void virgl_setup_color_fs(struct VirglCmdBuf *cbuf, uint32 handle);
 void virgl_setup_texture_fs(struct VirglCmdBuf *cbuf, uint32 handle);
-/* W3D_SetTexEnv combine pipeline */
-void virgl_setup_tc_color_vs(struct VirglCmdBuf *cbuf, uint32 handle);
-void virgl_setup_modulate_fs(struct VirglCmdBuf *cbuf, uint32 handle);
-void virgl_setup_decal_fs(struct VirglCmdBuf *cbuf, uint32 handle);
-void virgl_setup_blend_fs(struct VirglCmdBuf *cbuf, uint32 handle);
-void virgl_cmd_set_constant_buffer(struct VirglCmdBuf *cbuf, uint32 shader_type,
-                                   uint32 index, const float *data, uint32 nfloats);
 
 /* Sampler state + view */
 void virgl_cmd_create_sampler_state(struct VirglCmdBuf *cbuf, uint32 handle,

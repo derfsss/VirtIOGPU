@@ -327,7 +327,7 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)hw_s8,            /* 8  */
     (APTR)hw_CreateContext, /* 9  CreateContext */
     (APTR)hw_s10, (APTR)hw_s11, (APTR)hw_s12,
-    (APTR)w3d_DrawTriangle, /* 13 DrawTriangle  */
+    (APTR)hw_s13,           /* 13 (was DrawTriangle: mis-mapped state op) */
     (APTR)hw_s14, (APTR)hw_s15, (APTR)hw_s16, (APTR)hw_s17, (APTR)hw_s18,
     (APTR)hw_s19,           /* 19 SetState/Query/format-query -> 5 (keep) */
     (APTR)hw_s20, (APTR)hw_s21, (APTR)hw_s22,
@@ -336,8 +336,8 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)w3d_SetBlendMode, /* 25 SetBlendMode  */
     (APTR)hw_s26, (APTR)hw_s27, (APTR)hw_s28, (APTR)hw_s29,
     (APTR)hw_s30, (APTR)hw_s31, (APTR)hw_s32, (APTR)hw_s33, (APTR)hw_s34, (APTR)hw_s35,
-    (APTR)w3d_DrawTriStrip, /* 36 DrawTriStrip */
-    (APTR)w3d_DrawTriFan,   /* 37 DrawTriFan   */
+    (APTR)hw_s36, /* 36 (was DrawTriStrip: mis-mapped) */
+    (APTR)hw_s37,   /* 37 (was DrawTriFan: =SetZCompareMode! crashed) */
     (APTR)hw_s38, (APTR)hw_s39,
     (APTR)hw_s40, (APTR)hw_s41, (APTR)hw_s42, (APTR)hw_s43, (APTR)hw_s44, (APTR)hw_s45,
     (APTR)hw_s46, (APTR)hw_s47, (APTR)hw_s48, (APTR)hw_s49, (APTR)hw_s50, (APTR)hw_s51,
@@ -346,18 +346,18 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)w3d_FlushFrame,   /* 58 FlushFrame    */
     (APTR)hw_s59, (APTR)hw_s60,
     (APTR)hw_ClearDrawRegion, /* 61 ClearDrawRegion (ctx-guarded) */
-    (APTR)w3d_DrawTriangleV, /* 62 DrawTriangleV */
-    (APTR)w3d_DrawTriStripV, /* 63 DrawTriStripV */
-    (APTR)w3d_DrawTriFanV,   /* 64 DrawTriFanV   */
-    (APTR)w3d_VertexPointer,/* 65 VertexPointer */
+    (APTR)hw_s62, /* 62 (was DrawTriangleV: mis-mapped) */
+    (APTR)hw_s63, /* 63 (was DrawTriStripV: mis-mapped) */
+    (APTR)hw_s64,   /* 64 (was DrawTriFanV: mis-mapped) */
+    (APTR)hw_s65,/* 65 (was VertexPointer: cow uses 73/74/79) */
     (APTR)hw_s66,           /* 66 TexCoordPointer (stub: textures lag) */
-    (APTR)w3d_ColorPointer, /* 67 ColorPointer  */
-    (APTR)w3d_DrawArray,    /* 68 DrawArray     */
-    (APTR)w3d_DrawElements, /* 69 DrawElements  */
+    (APTR)hw_s67, /* 67 (was ColorPointer: cow uses 79) */
+    (APTR)hw_s68,    /* 68 (was DrawArray: mis-mapped) */
+    (APTR)hw_s69,           /* 69 (was DrawElements: cow draws via 76/79/80) */
     (APTR)hw_s70,
     (APTR)w3d_BindTexture,  /* 71 BindTexture   */
     (APTR)hw_s72, (APTR)hw_s73, (APTR)hw_s74,
-    (APTR)w3d_InterleavedArray, /* 75 InterleavedArray */
+    (APTR)hw_s75, /* 75 (cow uses 79 for InterleavedArray) */
     (APTR)hw_s76, (APTR)hw_s77, (APTR)hw_s78, (APTR)hw_s79, (APTR)hw_s80, (APTR)hw_s81,
     (APTR)hw_s82, (APTR)hw_s83, (APTR)hw_s84, (APTR)hw_s85, (APTR)hw_s86, (APTR)hw_s87,
     (APTR)-1              /* sentinel */

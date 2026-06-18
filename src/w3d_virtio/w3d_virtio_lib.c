@@ -240,7 +240,7 @@ HWSTUB(30) HWSTUB(31) HWSTUB(32) HWSTUB(33) HWSTUB(34) HWSTUB(35) HWSTUB(36) HWS
 HWSTUB(40) HWSTUB(41) HWSTUB(42) HWSTUB(43) HWSTUB(44) HWSTUB(45) HWSTUB(46) HWSTUB(47) HWSTUB(48) HWSTUB(49)
 HWSTUB(50) HWSTUB(51) HWSTUB(52) HWSTUB(53) HWSTUB(54) HWSTUB(55) HWSTUB(56) HWSTUB(57) HWSTUB(58) HWSTUB(59)
 HWSTUB(60) HWSTUB(61) HWSTUB(62) HWSTUB(63) HWSTUB(64) HWSTUB(65) HWSTUB(66) HWSTUB(67) HWSTUB(68) HWSTUB(69)
-HWSTUB(70) HWSTUB(71) HWSTUB(72) HWSTUB(73) HWSTUB(74) HWSTUB(75) HWSTUB(76) HWSTUB(77) HWSTUB(78)
+HWSTUB(70) HWSTUB(71) HWSTUB(72) HWSTUB(73) HWSTUB(74) HWSTUB(75) HWSTUB(77) HWSTUB(78)
 HWSTUB(80) HWSTUB(81) HWSTUB(82) HWSTUB(83) HWSTUB(84) HWSTUB(85) HWSTUB(86) HWSTUB(87)
 
 /* The FE's Warp3D_Init registration self-test calls slots 4 (AllocZBuffer) and
@@ -294,6 +294,31 @@ static APTR get_wv(W3D_Context *ctx)
     DBP("get_wv: lazy ctx=%08lx driver=%08lx %ldx%ld\n", (unsigned long)(APTR)ctx,
         (unsigned long)(APTR)ctx->driver, (long)ctx->width, (long)ctx->height);
     return ctx->driver;
+}
+
+/* slot 76 is OVERLOADED (gdb-confirmed): c!=0 -> a depth/Z state op where b,c point
+ * to two doubles (e.g. 0.0, 0.9); c==0 -> the DRAW path where b points to a ULONG
+ * vertex-index stream (triangle list).  Instrument both to decode the draw protocol
+ * via the ring: when c==0 dump the first 6 indices at b (2 triangles) so we learn
+ * the index count/format per call.  (RAM-guard b before deref.) */
+static uint32 hw_s76(APTR Self, W3D_Context *ctx, uint32 b, uint32 c, uint32 d)
+{
+    (void)Self; (void)d;
+    if (c == 0) {
+        if (b >= 0x10000000 && b < 0x80000000) {
+            const volatile uint32 *ix = (const volatile uint32 *)b;
+            DBP("slot76 DRAW ctx=%08lx idx@%08lx: %lu %lu %lu %lu %lu %lu\n",
+                (unsigned long)(APTR)ctx, (unsigned long)b,
+                (unsigned long)ix[0], (unsigned long)ix[1], (unsigned long)ix[2],
+                (unsigned long)ix[3], (unsigned long)ix[4], (unsigned long)ix[5]);
+        } else {
+            DBP("slot76 DRAW(end) ctx=%08lx b=%08lx\n", (unsigned long)(APTR)ctx, (unsigned long)b);
+        }
+    } else {
+        DBP("slot76 STATE ctx=%08lx b=%08lx c=%08lx\n",
+            (unsigned long)(APTR)ctx, (unsigned long)b, (unsigned long)c);
+    }
+    return 0;
 }
 
 /* slot 79 (off 0x188) = the cow's W3D_InterleavedArray (FE decomposes its high-level

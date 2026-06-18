@@ -1129,9 +1129,7 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
         wv->depth_write = (fe & W3D_ZBUFFERUPDATE) != 0;
         wv->blend_on    = (fe & W3D_BLENDING)      != 0;
     }
-    DW3D("DrawElements: prim=%lu count=%lu zt=%ld zw=%ld bl=%ld\n",
-        (unsigned long)prim, (unsigned long)count,
-        (long)wv->depth_test, (long)wv->depth_write, (long)wv->blend_on);
+    DW3D("DrawElements: prim=%lu count=%lu\n", (unsigned long)prim, (unsigned long)count);
     if (!wv->ia_ptr || !indices || count == 0) return W3D_ILLEGALINPUT;
     if (!wv->cmdbuf) return W3D_NOMEMORY;
 

@@ -240,7 +240,7 @@ HWSTUB(30) HWSTUB(31) HWSTUB(32) HWSTUB(33) HWSTUB(34) HWSTUB(35) HWSTUB(36) HWS
 HWSTUB(40) HWSTUB(41) HWSTUB(42) HWSTUB(43) HWSTUB(44) HWSTUB(45) HWSTUB(46) HWSTUB(47) HWSTUB(48) HWSTUB(49)
 HWSTUB(50) HWSTUB(51) HWSTUB(52) HWSTUB(53) HWSTUB(54) HWSTUB(55) HWSTUB(56) HWSTUB(57) HWSTUB(58) HWSTUB(59)
 HWSTUB(60) HWSTUB(61) HWSTUB(62) HWSTUB(63) HWSTUB(64) HWSTUB(65) HWSTUB(66) HWSTUB(67) HWSTUB(68)
-HWSTUB(70) HWSTUB(71) HWSTUB(72) HWSTUB(73) HWSTUB(74) HWSTUB(75) HWSTUB(77) HWSTUB(78)
+HWSTUB(70) HWSTUB(71) HWSTUB(72) HWSTUB(73) HWSTUB(74) HWSTUB(77) HWSTUB(78)
 HWSTUB(80) HWSTUB(81) HWSTUB(82) HWSTUB(83) HWSTUB(84) HWSTUB(85) HWSTUB(86) HWSTUB(87)
 
 /* The FE's Warp3D_Init registration self-test calls slots 4 (AllocZBuffer) and
@@ -310,13 +310,28 @@ static uint32 hw_s76(APTR Self, W3D_Context *ctx, uint32 b, uint32 c, uint32 d)
  * InterleavedArray to this backend primitive).  Runtime args match: (Self, ctx,
  * vtxptr, stride==40==sizeof(WARPPOINT), format, flags).  Ensure wv exists, then
  * stash the array via the proven render core (does NOT draw -> safe). */
+/* slot 75 (off 0x178) = the FE's canonical W3D_InterleavedArray dispatch (Ghidra:
+ * _Warp3D_W3D_InterleavedArray -> (ctx+0xc0)+0x178; base 76 => index 75).  THIS is
+ * where the cow's InterleavedArray actually lands -- it was mis-wired at 79 before
+ * (so the array never stashed, DrawElements@69 found no verts -> black). */
+static uint32 hw_s75(APTR Self, W3D_Context *ctx, void *p, uint32 stride,
+                     uint32 format, uint32 flags)
+{
+    (void)Self;
+    DBP("slot75 InterleavedArray ctx=%08lx p=%08lx stride=%ld fmt=%08lx\n",
+        (unsigned long)(APTR)ctx, (unsigned long)p, (long)stride, (unsigned long)format);
+    if (!get_wv(ctx)) return 0;
+    return w3d_InterleavedArray((struct Warp3DIFace *)0, ctx, p, (int)stride, format, flags);
+}
+
+/* slot 79 kept as InterleavedArray too (hedge: earlier runtime showed these args at
+ * index 79; harmless if the FE only calls 75). */
 static uint32 hw_s79(APTR Self, W3D_Context *ctx, void *p, uint32 stride,
                      uint32 format, uint32 flags)
 {
     (void)Self;
-    DBP("slot 79 InterleavedArray ctx=%08lx p=%08lx stride=%ld fmt=%08lx flags=%08lx\n",
-        (unsigned long)(APTR)ctx, (unsigned long)p, (long)stride,
-        (unsigned long)format, (unsigned long)flags);
+    DBP("slot79 InterleavedArray ctx=%08lx p=%08lx stride=%ld fmt=%08lx\n",
+        (unsigned long)(APTR)ctx, (unsigned long)p, (long)stride, (unsigned long)format);
     if (!get_wv(ctx)) return 0;
     return w3d_InterleavedArray((struct Warp3DIFace *)0, ctx, p, (int)stride, format, flags);
 }
@@ -331,9 +346,16 @@ static uint32 hw_s69(APTR Self, W3D_Context *ctx, uint32 prim, uint32 type,
 {
     (void)Self;
     if (!get_wv(ctx)) return (uint32)W3D_ILLEGALINPUT;
-    DBP("slot69 DrawElements prim=%lu type=%lu count=%lu idx=%08lx\n",
-        (unsigned long)prim, (unsigned long)type, (unsigned long)count,
-        (unsigned long)indices);
+    if (indices && (uint32)(APTR)indices >= 0x10000000 && (uint32)(APTR)indices < 0x80000000) {
+        const volatile uint32 *pi = (const volatile uint32 *)indices;
+        DBP("slot69 DrawElements prim=%lu type=%lu count=%lu PI[0..2]=%lu,%lu,%lu\n",
+            (unsigned long)prim, (unsigned long)type, (unsigned long)count,
+            (unsigned long)pi[0], (unsigned long)pi[1], (unsigned long)pi[2]);
+    } else {
+        DBP("slot69 DrawElements prim=%lu type=%lu count=%lu idx=%08lx (no PI)\n",
+            (unsigned long)prim, (unsigned long)type, (unsigned long)count,
+            (unsigned long)indices);
+    }
     return w3d_DrawElements((struct Warp3DIFace *)0, ctx, prim, type, count, indices);
 }
 

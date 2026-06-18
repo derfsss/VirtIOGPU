@@ -238,8 +238,13 @@ static BOOL v3d_CreateTexture(struct V3DIFace *Self, APTR token,
     }
     chip_CTXAttachResource(gs, gs->virgl_2d_ctx, res);
 
-    /* GP32-swap of a BE 0xRRGGBBAA pixel yields host LE bytes [R,G,B,A] --
-     * exactly what R8G8B8A8_UNORM expects, so the strip uploader is correct. */
+    /* The shared 32bpp uploader GP32-swaps each pixel (needed for command dwords
+     * and the BGRA framebuffer path).  A source RAW pixel [R,G,B,A] (BE word
+     * 0xRRGGBBAA) thus lands in the texture as bytes [A,B,G,R] -- fully reversed.
+     * Under R8G8B8A8_UNORM the texel decodes as (r=A,g=B,b=G,a=R), so we undo the
+     * reversal with a reversed sampler-view swizzle (ALPHA,BLUE,GREEN,RED) ->
+     * output (R,G,B,A).  (Without this the cow renders magenta/pink: brown
+     * 139,90,43,255 -> 255,43,90.) */
     if (!chip_comp_upload_pixels_32bpp(gs, res, (const uint32 *)data,
                                        src_bpr ? src_bpr : w * 4, 0, 0, w, h)) {
         DCHIP("v3d: CreateTexture pixel upload failed");
@@ -250,8 +255,8 @@ static BOOL v3d_CreateTexture(struct V3DIFace *Self, APTR token,
     view = v3d_handle(gs);
     virgl_cmd_init(&cb, words, 32);
     virgl_cmd_create_sampler_view(&cb, view, res, PIPE_FORMAT_R8G8B8A8_UNORM,
-        0, 0, PIPE_SWIZZLE_RED, PIPE_SWIZZLE_GREEN,
-        PIPE_SWIZZLE_BLUE, PIPE_SWIZZLE_ALPHA);
+        0, 0, PIPE_SWIZZLE_ALPHA, PIPE_SWIZZLE_BLUE,
+        PIPE_SWIZZLE_GREEN, PIPE_SWIZZLE_RED);
     if (!chip_Submit3D(gs, gs->virgl_2d_ctx, cb.buf, cb.dwords * 4)) {
         DCHIP("v3d: CreateTexture sampler view FAILED");
         chip_ResourceUnref(gs, res);

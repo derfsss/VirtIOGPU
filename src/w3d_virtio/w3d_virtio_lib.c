@@ -301,23 +301,33 @@ static APTR get_wv(W3D_Context *ctx)
  * vertex-index stream (triangle list).  Instrument both to decode the draw protocol
  * via the ring: when c==0 dump the first 6 indices at b (2 triangles) so we learn
  * the index count/format per call.  (RAM-guard b before deref.) */
+/* Accumulated triangle-strip vertex indices (the FE submits one per slot76 call,
+ * the strip ends with b==0).  Single-threaded enough for the cow. */
+#define STRIP_MAX 16384
+static uint32 g_strip[STRIP_MAX];
+static uint32 g_strip_n = 0;
+
 static uint32 hw_s76(APTR Self, W3D_Context *ctx, uint32 b, uint32 c, uint32 d)
 {
     (void)Self; (void)d;
-    if (c == 0) {
-        if (b >= 0x10000000 && b < 0x80000000) {
-            const volatile uint32 *ix = (const volatile uint32 *)b;
-            DBP("slot76 DRAW ctx=%08lx idx@%08lx: %lu %lu %lu %lu %lu %lu\n",
-                (unsigned long)(APTR)ctx, (unsigned long)b,
-                (unsigned long)ix[0], (unsigned long)ix[1], (unsigned long)ix[2],
-                (unsigned long)ix[3], (unsigned long)ix[4], (unsigned long)ix[5]);
-        } else {
-            DBP("slot76 DRAW(end) ctx=%08lx b=%08lx\n", (unsigned long)(APTR)ctx, (unsigned long)b);
-        }
-    } else {
-        DBP("slot76 STATE ctx=%08lx b=%08lx c=%08lx\n",
-            (unsigned long)(APTR)ctx, (unsigned long)b, (unsigned long)c);
+    /* c != 0 -> a depth/Z state op (b,c = double ptrs); not a draw. */
+    if (c != 0) return 0;
+    if (b >= 0x10000000 && b < 0x80000000) {
+        /* extend the strip with this vertex index (word1 = *(b+4)). */
+        uint32 idx = *(const volatile uint32 *)(b + 4);
+        if (idx < 0x100000 && g_strip_n < STRIP_MAX)   /* sane index guard */
+            g_strip[g_strip_n++] = idx;
+        return 0;
     }
+    /* b == 0 -> strip end: emit the accumulated strip as triangles, using the
+     * verts stashed by slot79 (InterleavedArray).  Present already works. */
+    if (g_strip_n >= 3 && get_wv(ctx)) {
+        DBP("slot76 EMIT TRISTRIP n=%lu (idx0=%lu)\n",
+            (unsigned long)g_strip_n, (unsigned long)g_strip[0]);
+        w3d_DrawElements((struct Warp3DIFace *)0, ctx,
+            W3D_PRIMITIVE_TRISTRIP, W3D_INDEX_ULONG, g_strip_n, g_strip);
+    }
+    g_strip_n = 0;
     return 0;
 }
 

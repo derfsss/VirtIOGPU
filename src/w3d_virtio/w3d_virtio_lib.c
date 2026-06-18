@@ -154,7 +154,13 @@ static const struct TagItem _mgr_Tags[] =
 /* Manager slots 0-3, then backend ops at slot >=4.                         */
 /* B1 PROBE: every op slot logs its index so a runtime trace pins the map.  */
 /* ----------------------------------------------------------------------- */
-static uint32 _main_Obtain(struct Interface *Self)  { return Self->Data.RefCount++; }
+/* Vector 0 (off 0x4c) is dual-purpose: GetInterface calls it as Obtain, AND the
+ * FE's Warp3D_Init registration (ghidra_fe5327.txt:4832) calls it and uses the
+ * RETURN as the per-driver TMU/caps value -> stored in DAT_0x1aebc -> copied to
+ * ctx+0xd0 by CreateContext.  W3D_SetTextureBlend returns -30 unless ctx+0xd0 > 4,
+ * so return a TMU count > 4 (8).  We still bump RefCount for Obtain/Release
+ * balance; returning non-zero is also the correct "obtained" signal. */
+static uint32 _main_Obtain(struct Interface *Self)  { Self->Data.RefCount++; return 8; }
 static uint32 _main_Release(struct Interface *Self) { return Self->Data.RefCount--; }
 
 /* B2 iter-1 probe: log Self + 3 args, and return best-effort values for the

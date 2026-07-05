@@ -159,6 +159,16 @@ static int32 vgb_Submit(APTR priv, uint32 queue, CONST_APTR payload,
     }
 
     vgb_fenceSeq = (vgb_fenceSeq + 1) & 0x00FFFFFF;
+
+    /* Async-fence contract (Phase 3.3): the chip transport completes
+       synchronously inside the op (chip_do_io waits the ring), so the
+       fence is retired RIGHT HERE -- report it. Fire-and-forget into the
+       server's own HI port (we run in the server task; no wait, no
+       deadlock). When the chip gains true IRQ-deferred completions, only
+       this call site moves to the completion path. */
+    if (vgb_IGpu != NULL && vgb_backendId >= 0)
+        vgb_IGpu->GPU_FenceRetired(vgb_backendId, (int32)vgb_fenceSeq);
+
     return (int32)vgb_fenceSeq;
 }
 
@@ -233,7 +243,8 @@ void gpu_backend_init(struct ChipGPUState *gs)
     info.WaitFence     = vgb_WaitFence;
     info.Present       = vgb_Present;
 
-    vgb_backendId = vgb_IGpu->GPU_RegisterBackendA(&info, NULL);
+    vgb_backendId = vgb_IGpu->GPU_RegisterBackendA(&info, GPU_TAGS(
+                        { GPUTAG_AsyncFences, TRUE }));
     if (vgb_backendId < 0)
     {
         DCHIP("gpu_backend: RegisterBackendA failed (%ld)",

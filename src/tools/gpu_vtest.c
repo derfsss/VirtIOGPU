@@ -90,6 +90,38 @@ int main(void)
             if (f1 > 0 && t1 == 1 && f2 > f1 && pr == GPUERR_OK)
                 rc = 0;
 
+            /* async-fence notification: the virtio backend registers with
+               GPUTAG_AsyncFences, so this signal is delivered via the
+               GPU_FenceRetired path -- Wait() proves deferred delivery. */
+            if (rc == 0 && cmd != NULL)
+            {
+                int8 sn = IExec->AllocSignal(-1);
+                if (sn != -1)
+                {
+                    uint32 mask = 1u << sn;
+                    int32 fn;
+                    IExec->SetSignal(0, mask);
+                    cmd->op = VGB_OP_NOP;
+                    fn = IGpu->GPU_SubmitA(GPU_QUEUE_RENDER, cmd,
+                             sizeof(*cmd),
+                             GPU_TAGS({ GPUTAG_Backend, (uint32)vid },
+                                      { GPUTAG_NotifySignal, mask }));
+                    if (fn > 0)
+                    {
+                        IExec->Wait(mask);
+                        printf("gpu_vtest: async notify fence=%ld "
+                               "DELIVERED\n", (long)fn);
+                    }
+                    else
+                    {
+                        printf("gpu_vtest: async notify submit failed "
+                               "(%ld)\n", (long)fn);
+                        rc = 10;
+                    }
+                    IExec->FreeSignal(sn);
+                }
+            }
+
             /* virgl path: needs gl=on device + virtiogpu_virgl2d=1 */
             if (rc == 0 && cmd != NULL)
             {

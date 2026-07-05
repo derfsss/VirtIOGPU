@@ -144,6 +144,16 @@ static int32 vgb_Submit(APTR priv, uint32 queue, CONST_APTR payload,
                 return GPUERR_LOST;
             break;
 
+        case VGB_OP_V3DCALL:
+        {
+            struct VgbV3DCall *vc = (struct VgbV3DCall *)cmd;
+            if (length < sizeof(*vc))
+                return GPUERR_BADARGS;
+            if (!chip_v3d_backend_call(gs, cmd->arg, vc->a))
+                return GPUERR_LOST;
+            break;
+        }
+
         default:
             return GPUERR_NOTIMPL;
     }

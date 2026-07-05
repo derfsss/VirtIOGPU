@@ -447,3 +447,61 @@ const struct TagItem _chip_v3d_Tags[] __attribute__((used)) =
     { MIT_DataSize,    sizeof(struct V3DIFace)   },
     { TAG_DONE,        0                         }
 };
+
+/* -----------------------------------------------------------------------
+ * chip_v3d_backend_call -- gpu.library backend dispatcher (Phase 3.2b-2).
+ *
+ * Routes VGB_OP_V3DCALL methods onto the same static v3d implementations
+ * the "v3d" interface exports, so warp3d/W3D render through gpu.library
+ * with identical semantics. Self is unused by every v3d method (all take
+ * token = gs), so NULL is safe. Runs in the gpu.library server task; the
+ * IGpu caller is blocked for the duration, so pointer args in a[] remain
+ * valid. Returns 1 on success, 0 on failure.
+ * ----------------------------------------------------------------------- */
+#include <gpulib/virtio_gpu_backend.h>
+
+int32 chip_v3d_backend_call(struct ChipGPUState *gs, uint32 method,
+                            uint32 *a)
+{
+    APTR tok = (APTR)gs;   /* token is always the chip state */
+
+    switch (method)
+    {
+        case VGB_V3D_OBTAIN:
+            return v3d_ObtainContext(NULL, NULL,
+                       (struct V3DContextInfo *)a[0]) ? 1 : 0;
+        case VGB_V3D_SUBMIT:
+            return v3d_Submit(NULL, tok, a[1],
+                       (const uint32 *)a[2], a[3]) ? 1 : 0;
+        case VGB_V3D_FLUSH:
+            return v3d_Flush(NULL, tok, a[1], a[2], a[3], a[4], a[5]) ? 1 : 0;
+        case VGB_V3D_RELEASE:
+            v3d_ReleaseContext(NULL, tok);
+            return 1;
+        case VGB_V3D_ALLOC_RT:
+            return v3d_AllocRenderTarget(NULL, tok, a[1], a[2],
+                       (uint32 *)a[3], (uint32 *)a[4]) ? 1 : 0;
+        case VGB_V3D_OVERLAY:
+            v3d_RegisterOverlay(NULL, tok, a[1], a[2], a[3],
+                                a[4], a[5], a[6], a[7], (BOOL)a[8]);
+            return 1;
+        case VGB_V3D_FREE_RT:
+            v3d_FreeRenderTarget(NULL, tok, a[1], a[2]);
+            return 1;
+        case VGB_V3D_ALLOC_Z:
+            return v3d_AllocDepthBuffer(NULL, tok, a[1], a[2],
+                       (uint32 *)a[3], (uint32 *)a[4]) ? 1 : 0;
+        case VGB_V3D_CREATE_TEX:
+            return v3d_CreateTexture(NULL, tok, a[1], a[2],
+                       (APTR)a[3], a[4],
+                       (uint32 *)a[5], (uint32 *)a[6]) ? 1 : 0;
+        case VGB_V3D_FREE_TEX:
+            v3d_FreeTexture(NULL, tok, a[1], a[2]);
+            return 1;
+        case VGB_V3D_PRESENT_BM:
+            return v3d_PresentBitmap(NULL, tok, a[1], a[2], a[3],
+                       (APTR)a[4], a[5]) ? 1 : 0;
+        default:
+            return 0;
+    }
+}

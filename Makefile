@@ -84,7 +84,7 @@ MGL_OBJ      = $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(MGL_SRC))
 # encoder; no ChipGPUState / virgl_submit).  Needs the SDK warp3d headers.
 # -----------------------------------------------------------------------
 W3D_TARGET   = $(BUILD_DIR)/warp3d.library
-W3D_CFLAGS   = -O2 -Wall -I./include -fno-tree-loop-distribute-patterns \
+W3D_CFLAGS   = -O2 -Wall -I./include -I./include/gpulib -fno-tree-loop-distribute-patterns \
                -mcrt=newlib -D__NOLIBBASE__ -D__NOGLOBALIFACE__ $(DEPFLAGS)
 W3D_LDFLAGS  = -mcrt=newlib -nostartfiles
 W3D_OBJ      = $(BUILD_DIR)/warp3d/warp3d_lib.o \
@@ -96,7 +96,7 @@ W3D_OBJ      = $(BUILD_DIR)/warp3d/warp3d_lib.o \
 # stock Warp3D.library FE 53.27 from LIBS:Warp3D/HWdrivers/.  B1 = probe skeleton.
 # -----------------------------------------------------------------------
 W3DVIO_TARGET  = $(BUILD_DIR)/W3D_VirtIOGPU.library
-W3DVIO_CFLAGS  = -O2 -Wall -I./include -fno-tree-loop-distribute-patterns \
+W3DVIO_CFLAGS  = -O2 -Wall -I./include -I./include/gpulib -fno-tree-loop-distribute-patterns \
                  -mcrt=newlib -D__NOLIBBASE__ -D__NOGLOBALIFACE__ $(DEPFLAGS)
 W3DVIO_LDFLAGS = -mcrt=newlib -nostartfiles
 # B-hw2: the HW backend now compiles in the proven virgl render core

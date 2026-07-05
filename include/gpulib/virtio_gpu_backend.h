@@ -22,6 +22,29 @@
                                 virgl resource (RESOURCE_FLUSH)           */
 #define VGB_OP_TRITEST    5  /* draw the chip's proven RGB test triangle
                                 over the scanout (visual transport proof) */
+#define VGB_OP_V3DCALL    6  /* generic v3d method call: arg = VGB_V3D_*,
+                                args in the VgbV3DCall block. Pointers in
+                                the args are read/written DURING the
+                                (synchronous) submit — valid because the
+                                caller blocks until completion            */
+
+/* VGB_OP_V3DCALL method selectors (mirror the chip's v3d transport).
+** Arg packing (a[0] = token, then the v3d method's args in order;
+** pointer args passed as uint32):                                       */
+#define VGB_V3D_OBTAIN     0  /* a[0]=(struct V3DContextInfo *)out        */
+#define VGB_V3D_SUBMIT     1  /* a[0]=tok a[1]=ctx a[2]=words a[3]=nwords */
+#define VGB_V3D_FLUSH      2  /* a[0]=tok a[1]=res a[2..5]=x,y,w,h        */
+#define VGB_V3D_RELEASE    3  /* a[0]=tok                                 */
+#define VGB_V3D_ALLOC_RT   4  /* a[0]=tok a[1]=w a[2]=h a[3]=&res a[4]=&surf */
+#define VGB_V3D_OVERLAY    5  /* a[0]=tok a[1]=rt a[2]=sw a[3]=sh
+                                 a[4..7]=x,y,w,h a[8]=enable              */
+#define VGB_V3D_FREE_RT    6  /* a[0]=tok a[1]=res a[2]=surface           */
+#define VGB_V3D_ALLOC_Z    7  /* a[0]=tok a[1]=w a[2]=h a[3]=&res a[4]=&surf */
+#define VGB_V3D_CREATE_TEX 8  /* a[0]=tok a[1]=w a[2]=h a[3]=data a[4]=bpr
+                                 a[5]=&view a[6]=&res                     */
+#define VGB_V3D_FREE_TEX   9  /* a[0]=tok a[1]=res a[2]=view              */
+#define VGB_V3D_PRESENT_BM 10 /* a[0]=tok a[1]=rt a[2]=sw a[3]=sh
+                                 a[4]=dst_base a[5]=dst_stride            */
 
 struct VgbCmd
 {
@@ -33,6 +56,12 @@ struct VgbFlushRect
 {
     struct VgbCmd hdr;    /* op = VGB_OP_FLUSHRECT, arg = res_id         */
     uint32 x, y, w, h;
+};
+
+struct VgbV3DCall
+{
+    struct VgbCmd hdr;    /* op = VGB_OP_V3DCALL, arg = VGB_V3D_*         */
+    uint32 a[10];
 };
 
 /* Filled by VGB_OP_GETCTX: live handles into the chip's virgl pipeline

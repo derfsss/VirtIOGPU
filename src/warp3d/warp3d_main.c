@@ -24,6 +24,151 @@
 static struct Library       *g_CyberGfxBase = NULL;
 static struct CyberGfxIFace *g_ICyberGfx    = NULL;
 
+/* ---- gpu.library-routed v3d transport (Phase 3.2b-2) --------------------
+ * The same V3DIFace surface the render code below already uses, carried
+ * over gpu.library VGB_OP_V3DCALL submits to the 'virtio-gpu' backend
+ * instead of the chip's private "v3d" interface. The IGpu submit is
+ * synchronous (the caller blocks until the backend op completes), so
+ * pointer args inside the call block remain valid throughout. */
+#include <libraries/gpu.h>           /* vendored: -I./include/gpulib */
+#include <interfaces/gpu.h>
+#include <gpulib/virtio_gpu_backend.h>
+
+static struct Library  *g_GpuBase = NULL;
+static struct GpuIFace *g_IGpu    = NULL;
+static int32            g_gpuVid  = -1;
+
+static int32 v3dgpu_do(uint32 method, struct VgbV3DCall *c)
+{
+    c->hdr.op  = VGB_OP_V3DCALL;
+    c->hdr.arg = method;
+    return g_IGpu->GPU_SubmitA(GPU_QUEUE_RENDER, c, sizeof(*c),
+               GPU_TAGS({ GPUTAG_Backend, (uint32)g_gpuVid }));
+}
+
+static uint32 v3dgpu_Obtain(struct V3DIFace *Self)
+{ (void)Self; return 1; }
+static uint32 v3dgpu_Release(struct V3DIFace *Self)
+{ (void)Self; return 1; }
+
+static BOOL v3dgpu_ObtainContext(struct V3DIFace *Self, struct BitMap *dest,
+                                 struct V3DContextInfo *info)
+{
+    struct VgbV3DCall c; (void)Self; (void)dest;
+    c.a[0] = (uint32)info;
+    return v3dgpu_do(VGB_V3D_OBTAIN, &c) > 0;
+}
+
+static BOOL v3dgpu_Submit(struct V3DIFace *Self, APTR token, uint32 ctx_id,
+                          const uint32 *words, uint32 nwords)
+{
+    struct VgbV3DCall c; (void)Self;
+    c.a[0] = (uint32)token; c.a[1] = ctx_id;
+    c.a[2] = (uint32)words; c.a[3] = nwords;
+    return v3dgpu_do(VGB_V3D_SUBMIT, &c) > 0;
+}
+
+static BOOL v3dgpu_Flush(struct V3DIFace *Self, APTR token, uint32 res_id,
+                         uint32 x, uint32 y, uint32 w, uint32 h)
+{
+    struct VgbV3DCall c; (void)Self;
+    c.a[0] = (uint32)token; c.a[1] = res_id;
+    c.a[2] = x; c.a[3] = y; c.a[4] = w; c.a[5] = h;
+    return v3dgpu_do(VGB_V3D_FLUSH, &c) > 0;
+}
+
+static void v3dgpu_ReleaseContext(struct V3DIFace *Self, APTR token)
+{
+    struct VgbV3DCall c; (void)Self;
+    c.a[0] = (uint32)token;
+    v3dgpu_do(VGB_V3D_RELEASE, &c);
+}
+
+static BOOL v3dgpu_AllocRenderTarget(struct V3DIFace *Self, APTR token,
+                                     uint32 w, uint32 h,
+                                     uint32 *res_out, uint32 *surface_out)
+{
+    struct VgbV3DCall c; (void)Self;
+    c.a[0] = (uint32)token; c.a[1] = w; c.a[2] = h;
+    c.a[3] = (uint32)res_out; c.a[4] = (uint32)surface_out;
+    return v3dgpu_do(VGB_V3D_ALLOC_RT, &c) > 0;
+}
+
+static void v3dgpu_RegisterOverlay(struct V3DIFace *Self, APTR token,
+                                   uint32 rt_res, uint32 sw, uint32 sh,
+                                   uint32 x, uint32 y, uint32 w, uint32 h,
+                                   BOOL enable)
+{
+    struct VgbV3DCall c; (void)Self;
+    c.a[0] = (uint32)token; c.a[1] = rt_res; c.a[2] = sw; c.a[3] = sh;
+    c.a[4] = x; c.a[5] = y; c.a[6] = w; c.a[7] = h; c.a[8] = (uint32)enable;
+    v3dgpu_do(VGB_V3D_OVERLAY, &c);
+}
+
+static void v3dgpu_FreeRenderTarget(struct V3DIFace *Self, APTR token,
+                                    uint32 res, uint32 surface)
+{
+    struct VgbV3DCall c; (void)Self;
+    c.a[0] = (uint32)token; c.a[1] = res; c.a[2] = surface;
+    v3dgpu_do(VGB_V3D_FREE_RT, &c);
+}
+
+static BOOL v3dgpu_AllocDepthBuffer(struct V3DIFace *Self, APTR token,
+                                    uint32 w, uint32 h,
+                                    uint32 *res_out, uint32 *surface_out)
+{
+    struct VgbV3DCall c; (void)Self;
+    c.a[0] = (uint32)token; c.a[1] = w; c.a[2] = h;
+    c.a[3] = (uint32)res_out; c.a[4] = (uint32)surface_out;
+    return v3dgpu_do(VGB_V3D_ALLOC_Z, &c) > 0;
+}
+
+static BOOL v3dgpu_CreateTexture(struct V3DIFace *Self, APTR token,
+                                 uint32 w, uint32 h, APTR data,
+                                 uint32 src_bpr,
+                                 uint32 *view_out, uint32 *res_out)
+{
+    struct VgbV3DCall c; (void)Self;
+    c.a[0] = (uint32)token; c.a[1] = w; c.a[2] = h;
+    c.a[3] = (uint32)data; c.a[4] = src_bpr;
+    c.a[5] = (uint32)view_out; c.a[6] = (uint32)res_out;
+    return v3dgpu_do(VGB_V3D_CREATE_TEX, &c) > 0;
+}
+
+static void v3dgpu_FreeTexture(struct V3DIFace *Self, APTR token,
+                               uint32 res, uint32 view)
+{
+    struct VgbV3DCall c; (void)Self;
+    c.a[0] = (uint32)token; c.a[1] = res; c.a[2] = view;
+    v3dgpu_do(VGB_V3D_FREE_TEX, &c);
+}
+
+static BOOL v3dgpu_PresentBitmap(struct V3DIFace *Self, APTR token,
+                                 uint32 rt_res, uint32 sw, uint32 sh,
+                                 APTR dst_base, uint32 dst_stride)
+{
+    struct VgbV3DCall c; (void)Self;
+    c.a[0] = (uint32)token; c.a[1] = rt_res; c.a[2] = sw; c.a[3] = sh;
+    c.a[4] = (uint32)dst_base; c.a[5] = dst_stride;
+    return v3dgpu_do(VGB_V3D_PRESENT_BM, &c) > 0;
+}
+
+static struct V3DIFace v3dgpu_iface = {
+    .Obtain            = v3dgpu_Obtain,
+    .Release           = v3dgpu_Release,
+    .ObtainContext     = v3dgpu_ObtainContext,
+    .Submit            = v3dgpu_Submit,
+    .Flush             = v3dgpu_Flush,
+    .ReleaseContext    = v3dgpu_ReleaseContext,
+    .AllocRenderTarget = v3dgpu_AllocRenderTarget,
+    .RegisterOverlay   = v3dgpu_RegisterOverlay,
+    .FreeRenderTarget  = v3dgpu_FreeRenderTarget,
+    .AllocDepthBuffer  = v3dgpu_AllocDepthBuffer,
+    .CreateTexture     = v3dgpu_CreateTexture,
+    .FreeTexture       = v3dgpu_FreeTexture,
+    .PresentBitmap     = v3dgpu_PresentBitmap,
+};
+
 static struct CyberGfxIFace *ensure_cybergfx(void)
 {
     if (!g_ICyberGfx) {
@@ -332,16 +477,35 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
         return NULL;
     }
 
-    /* Bring up the chip transport on first use. */
-    if (!g_chipBase) {
-        g_chipBase = IExec->OpenLibrary("virtiogpu.chip", 0);
-        if (g_chipBase)
-            g_IV3D = (struct V3DIFace *)IExec->GetInterface(g_chipBase,
-                                                            V3D_IFACE_NAME,
-                                                            V3D_IFACE_VERSION, NULL);
+    /* Bring up the transport on first use. Phase 3.2b-2: routed through
+     * gpu.library's 'virtio-gpu' backend (VGB_OP_V3DCALL) instead of the
+     * chip's private "v3d" interface -- the adapter above presents the
+     * same V3DIFace surface, so the render code is unchanged. */
+    if (!g_IV3D) {
+        if (!g_GpuBase) {
+            g_GpuBase = IExec->OpenLibrary("gpu.library", 53);
+            if (g_GpuBase)
+                g_IGpu = (struct GpuIFace *)
+                    IExec->GetInterface(g_GpuBase, "main", 1, NULL);
+        }
+        if (g_IGpu && g_gpuVid < 0) {
+            uint32 i;
+            for (i = 0; i < 4; i++) {
+                CONST_STRPTR name = NULL;
+                g_IGpu->GPU_GetAttrsA(GPU_TAGS(
+                    { GPUATTR_BackendIndex, i },
+                    { GPUATTR_BackendName,  (uint32)&name }));
+                if (name && name[0] == 'v' && name[1] == 'i') {
+                    g_gpuVid = (int32)i;
+                    break;
+                }
+            }
+        }
+        if (g_gpuVid >= 0)
+            g_IV3D = &v3dgpu_iface;
     }
     if (!g_IV3D) {
-        DW3D("CreateContext: chip 'v3d' transport unavailable\n");
+        DW3D("CreateContext: gpu.library 'virtio-gpu' backend unavailable\n");
         if (error) *error = W3D_NODRIVER;
         return NULL;
     }

@@ -933,6 +933,10 @@ void chip_flush_task_entry(void)
           gs->virgl_2d_ready ? "YES" : "NO", gs->resource_id,
           ITimer ? "ON" : "OFF");
 
+    /* Phase 3.2a: register this chip as a gpu.library backend -- done here
+     * (full task context, post-init) rather than from the boot resident. */
+    gpu_backend_init(gs);
+
     BOOL timer_pending = FALSE;
     uint32 cycle = 0;
 

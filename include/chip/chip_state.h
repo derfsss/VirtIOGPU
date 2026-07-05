@@ -1097,6 +1097,7 @@ void chip_flush_task_entry(void);
 /* Wake the flush task immediately -- replaces direct chip_flush_all() calls
  * from vtable ops so they return quickly and let the flush task coalesce. */
 void chip_flush_signal_activity(struct ChipGPUState *gs);
+void gpu_backend_init(struct ChipGPUState *gs);   /* chip_gpu_backend.c */
 
 /* chip_perf.c -- Phase 7 performance experiments (zero-copy / dirty-rect).
  * All gated by ENV: vars; default build behaviour is unchanged. */

@@ -26,7 +26,8 @@ CC = ppc-amigaos-gcc
 # infrastructure (CLT_*, GetInterface, TOC pointer) works correctly.
 # -MMD -MP emits .d files so header edits retrigger the right TUs.
 DEPFLAGS     = -MMD -MP
-CHIP_CFLAGS  = -O2 -Wall -I./include -fno-tree-loop-distribute-patterns -DDEBUG \
+CHIP_CFLAGS  = -O2 -Wall -I./include -I./include/gpulib \
+               -fno-tree-loop-distribute-patterns -DDEBUG \
                -mcrt=newlib -D__NOLIBBASE__ -D__NOGLOBALIFACE__ $(DEPFLAGS)
 CHIP_LDFLAGS = -mcrt=newlib -nostartfiles
 
@@ -44,6 +45,7 @@ CHIP_TARGET = $(BUILD_DIR)/virtiogpu.chip
 MGL_TARGET  = $(BUILD_DIR)/minigl.library
 COMP_TARGET = $(BUILD_DIR)/test_composite
 INFO_TARGET = $(BUILD_DIR)/virtiogpu_info
+GPUVTEST_TARGET = $(BUILD_DIR)/gpu_vtest
 W3DTRI_TARGET = $(BUILD_DIR)/w3dtri
 
 # -----------------------------------------------------------------------
@@ -68,6 +70,7 @@ CHIP_SRC     = src/chip/chip_lib.c \
                src/chip/chip_perf.c \
                src/chip/chip_v3d.c \
                src/chip/chip_gpu_srv.c \
+               src/chip/chip_gpu_backend.c \
                src/chip/chip_init.c
 CHIP_OBJ     = $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(CHIP_SRC))
 CHIP_VQ_OBJ  = $(BUILD_DIR)/chip/virtqueue_chip.o
@@ -106,7 +109,7 @@ DEP = $(CHIP_OBJ:.o=.d) $(CHIP_VQ_OBJ:.o=.d) $(MGL_OBJ:.o=.d) $(W3D_OBJ:.o=.d) $
 
 .PHONY: all clean dist dist-lha help
 
-all: $(CHIP_TARGET) $(MGL_TARGET) $(W3D_TARGET) $(W3DVIO_TARGET) $(COMP_TARGET) $(INFO_TARGET) $(W3DTRI_TARGET)
+all: $(CHIP_TARGET) $(MGL_TARGET) $(W3D_TARGET) $(W3DVIO_TARGET) $(COMP_TARGET) $(INFO_TARGET) $(W3DTRI_TARGET) $(GPUVTEST_TARGET)
 
 $(W3DVIO_TARGET): $(W3DVIO_OBJ)
 	$(CC) $(W3DVIO_OBJ) -o $(W3DVIO_TARGET) $(W3DVIO_LDFLAGS)
@@ -169,6 +172,10 @@ $(COMP_TARGET): src/tools/test_composite.c
 $(INFO_TARGET): src/tools/virtiogpu_info.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) -O2 -Wall $< -o $@ -lauto
+
+$(GPUVTEST_TARGET): src/tools/gpu_vtest.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -O2 -Wall -I./include -I./include/gpulib $< -o $@ -lauto
 
 $(W3DTRI_TARGET): src/tools/w3dtri.c
 	@mkdir -p $(BUILD_DIR)

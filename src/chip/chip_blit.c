@@ -868,6 +868,26 @@ static void chip_InvertRect(struct BoardInfo *bi, struct RenderInfoChip *ri,
  * ----------------------------------------------------------------------- */
 void chip_blit_fill_vtable(struct BoardInfo *bi)
 {
+#ifdef GPU_SHIM_CONTRACT
+    /* SHIM-CONTRACT build (P96_Replacement Phase 4): assign ONLY the
+     * frozen SHIM_CONTRACT.md blit subset -- FillRect, BlitRect and
+     * BlitRectNoMaskComplete (the ops graphics.library's screen-drag
+     * composition depends on).  Every other blit/draw slot is left at
+     * whatever PCIGraphics.card pre-filled (its software fallbacks) --
+     * deliberately NOT no-op stubs, which would lose rendering.  Log the
+     * inherited defaults so the boot trace records the reduced surface. */
+    DCHIP("SHIM: contract-only blits; defaults kept: P2C=%p P2D=%p "
+          "Invert=%p Template=%p Pattern=%p Line=%p",
+          (APTR)bi->BlitPlanar2Chunky, (APTR)bi->BlitPlanar2Direct,
+          (APTR)bi->InvertRect, (APTR)bi->BlitTemplate,
+          (APTR)bi->BlitPattern, (APTR)bi->DrawLine);
+    bi->FillRect                 = chip_FillRect;
+    bi->FillRectFB               = chip_FillRect;
+    bi->BlitRect                 = chip_BlitRect;
+    bi->BlitRectFB               = chip_BlitRect;
+    bi->BlitRectNoMaskComplete   = chip_BlitRectNoMaskComplete;
+    bi->BlitRectNoMaskCompleteFB = chip_BlitRectNoMaskComplete;
+#else
     bi->BlitPlanar2Chunky        = chip_BlitPlanar2Chunky;
     bi->BlitPlanar2ChunkyFB      = chip_BlitPlanar2Chunky;
     bi->BlitPlanar2Direct        = chip_BlitPlanar2Direct;
@@ -886,4 +906,5 @@ void chip_blit_fill_vtable(struct BoardInfo *bi)
     bi->DrawLineFB               = chip_DrawLine;
     bi->BlitRectNoMaskComplete   = chip_BlitRectNoMaskComplete;
     bi->BlitRectNoMaskCompleteFB = chip_BlitRectNoMaskComplete;
+#endif
 }

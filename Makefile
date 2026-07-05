@@ -29,6 +29,12 @@ DEPFLAGS     = -MMD -MP
 CHIP_CFLAGS  = -O2 -Wall -I./include -I./include/gpulib \
                -fno-tree-loop-distribute-patterns -DDEBUG \
                -mcrt=newlib -D__NOLIBBASE__ -D__NOGLOBALIFACE__ $(DEPFLAGS)
+# `make SHIM_CONTRACT=1 ...` builds the P96_Replacement Phase 4
+# contract-only shim variant (frozen SHIM_CONTRACT.md blit subset;
+# everything else keeps the PCIGraphics.card soft defaults).
+ifdef SHIM_CONTRACT
+CHIP_CFLAGS += -DGPU_SHIM_CONTRACT
+endif
 CHIP_LDFLAGS = -mcrt=newlib -nostartfiles
 
 # MiniGL stub library uses the same flags as the chip

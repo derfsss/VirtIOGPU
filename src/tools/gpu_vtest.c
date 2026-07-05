@@ -86,13 +86,73 @@ int main(void)
             }
             printf("gpu_vtest: NOP fence=%ld test=%ld | FLUSH fence=%ld "
                    "present=%ld\n", (long)f1, (long)t1, (long)f2, (long)pr);
-            IGpu->GPU_DestroyBuffer(buf);
 
             if (f1 > 0 && t1 == 1 && f2 > f1 && pr == GPUERR_OK)
+                rc = 0;
+
+            /* virgl path: needs gl=on device + virtiogpu_virgl2d=1 */
+            if (rc == 0 && cmd != NULL)
+            {
+                struct VgbCtxInfo ctx;
+                int32 fc;
+
+                cmd = (struct VgbCmd *)IGpu->GPU_MapBuffer(buf);
+                cmd->op  = VGB_OP_GETCTX;
+                cmd->arg = (uint32)&ctx;
+                fc = IGpu->GPU_SubmitA(GPU_QUEUE_RENDER, cmd, sizeof(*cmd),
+                                       GPU_TAGS({ GPUTAG_Backend,
+                                                  (uint32)vid }));
+                if (fc == GPUERR_NOTIMPL)
+                {
+                    printf("gpu_vtest: virgl NOT available (2D profile) -- "
+                           "3D ops skipped\n");
+                }
+                else if (fc > 0)
+                {
+                    struct VgbFlushRect fr;
+                    int32 ft, ff;
+
+                    printf("gpu_vtest: virgl ctx=%lu scanout=%lu %lux%lu\n",
+                           (unsigned long)ctx.ctx_id,
+                           (unsigned long)ctx.scanout_res,
+                           (unsigned long)ctx.fb_width,
+                           (unsigned long)ctx.fb_height);
+
+                    cmd->op  = VGB_OP_TRITEST;
+                    cmd->arg = 0;
+                    ft = IGpu->GPU_SubmitA(GPU_QUEUE_RENDER, cmd,
+                                           sizeof(*cmd),
+                                           GPU_TAGS({ GPUTAG_Backend,
+                                                      (uint32)vid }));
+
+                    fr.hdr.op  = VGB_OP_FLUSHRECT;
+                    fr.hdr.arg = ctx.scanout_res;
+                    fr.x = 0; fr.y = 0;
+                    fr.w = ctx.fb_width; fr.h = ctx.fb_height;
+                    ff = IGpu->GPU_SubmitA(GPU_QUEUE_RENDER, &fr,
+                                           sizeof(fr),
+                                           GPU_TAGS({ GPUTAG_Backend,
+                                                      (uint32)vid }));
+
+                    printf("gpu_vtest: TRITEST fence=%ld FLUSHRECT "
+                           "fence=%ld\n", (long)ft, (long)ff);
+                    if (ft <= 0 || ff <= 0)
+                        rc = 10;
+                }
+                else
+                {
+                    printf("gpu_vtest: GETCTX failed (%ld)\n", (long)fc);
+                    rc = 10;
+                }
+                IGpu->GPU_UnmapBuffer(buf);
+            }
+
+            IGpu->GPU_DestroyBuffer(buf);
+
+            if (rc == 0)
             {
                 printf("gpu_vtest: ALL PASS\n");
                 IExec->DebugPrintF("[gpu_vtest] ALL PASS\n");
-                rc = 0;
             }
         }
         else

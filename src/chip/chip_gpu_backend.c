@@ -84,9 +84,66 @@ static int32 vgb_Submit(APTR priv, uint32 queue, CONST_APTR payload,
     {
         case VGB_OP_NOP:
             break;
+
         case VGB_OP_FLUSH:
             chip_flush_signal_activity(gs);
             break;
+
+        case VGB_OP_GETCTX:
+        {
+            struct VgbCtxInfo *out = (struct VgbCtxInfo *)cmd->arg;
+            if (out == NULL)
+                return GPUERR_BADARGS;
+            if (!gs->virgl_2d_ready)
+                return GPUERR_NOTIMPL;
+            out->ctx_id         = gs->virgl_2d_ctx;
+            out->vbuf_res       = gs->virgl_2d_vbuf_res;
+            out->vbuf_size      = 65536;
+            out->scanout_res    = gs->resource_id;
+            out->vs_handle      = gs->virgl_2d_vs;
+            out->fs_handle      = gs->virgl_2d_fs;
+            out->fs_tex_handle  = gs->virgl_2d_fs_tex;
+            out->ve_handle      = gs->virgl_2d_ve;
+            out->sampler        = gs->virgl_2d_sampler;
+            out->sampler_linear = gs->virgl_2d_sampler_linear;
+            out->fb_width       = gs->fb_width;
+            out->fb_height      = gs->fb_height;
+            break;
+        }
+
+        case VGB_OP_SUBMIT3D:
+        {
+            const uint32 *words = (const uint32 *)(cmd + 1);
+            uint32 nbytes = length - sizeof(*cmd);
+            if (nbytes == 0 || gs->virgl_ctx_error)
+                return GPUERR_BADARGS;
+            if (!gs->virgl_2d_ready)
+                return GPUERR_NOTIMPL;
+            if (!chip_Submit3D(gs, cmd->arg, (void *)words, nbytes))
+                return GPUERR_LOST;
+            break;
+        }
+
+        case VGB_OP_FLUSHRECT:
+        {
+            const struct VgbFlushRect *fr = (const struct VgbFlushRect *)cmd;
+            if (length < sizeof(*fr))
+                return GPUERR_BADARGS;
+            if (!gs->virgl_2d_ready)
+                return GPUERR_NOTIMPL;
+            if (!chip_ResourceFlush(gs, fr->hdr.arg, fr->x, fr->y,
+                                    fr->w, fr->h))
+                return GPUERR_LOST;
+            break;
+        }
+
+        case VGB_OP_TRITEST:
+            if (!gs->virgl_2d_ready)
+                return GPUERR_NOTIMPL;
+            if (!chip_virgl_draw_test_triangle(gs))
+                return GPUERR_LOST;
+            break;
+
         default:
             return GPUERR_NOTIMPL;
     }

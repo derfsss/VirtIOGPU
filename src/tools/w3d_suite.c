@@ -155,6 +155,39 @@ static void present(void)
     IW3D->W3D_WaitIdle(g_ctx);
 }
 
+/* Same quad through the SEPARATE V4 array pointers (VertexPointer +
+ * ColorPointer + TexCoordPointer + DrawElements) -- the MiniGL path,
+ * exercising the driver's non-interleaved gather. */
+static uint32 draw_quad_sep(float x0, float y0, float x1, float y1, float z,
+                            float r, float g, float b, float a)
+{
+    static float  sp[4 * 3];
+    static float  sc[4 * 4];
+    static float  st[4 * 2];
+    static uint16 sidx[6] = { 0, 1, 2, 0, 2, 3 };
+    static const float us[4] = { 0.0f, 1.0f, 1.0f, 0.0f };
+    static const float vs[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+    int i;
+    uint32 rc;
+
+    for (i = 0; i < 4; i++) {
+        sp[i * 3 + 0] = (i == 1 || i == 2) ? x1 : x0;
+        sp[i * 3 + 1] = (i >= 2) ? y1 : y0;
+        sp[i * 3 + 2] = z;
+        sc[i * 4 + 0] = r; sc[i * 4 + 1] = g;
+        sc[i * 4 + 2] = b; sc[i * 4 + 3] = a;
+        st[i * 2 + 0] = us[i]; st[i * 2 + 1] = vs[i];
+    }
+    rc = IW3D->W3D_VertexPointer(g_ctx, sp, 12, W3D_VERTEX_F_F_F, 0);
+    if (rc != W3D_SUCCESS) return rc;
+    rc = IW3D->W3D_ColorPointer(g_ctx, sc, 16, W3D_COLOR_FLOAT, W3D_CMODE_RGBA, 0);
+    if (rc != W3D_SUCCESS) return rc;
+    rc = IW3D->W3D_TexCoordPointer(g_ctx, st, 8, 0, 4, 0, 0);
+    if (rc != W3D_SUCCESS) return rc;
+    return IW3D->W3D_DrawElements(g_ctx, W3D_PRIMITIVE_TRIANGLES,
+                                  W3D_INDEX_UWORD, 6, sidx);
+}
+
 /* ---- textures ---------------------------------------------------------- */
 
 /* Solid-colour RGBA texture (32bpp raw, the backend's proven upload format).
@@ -560,6 +593,25 @@ int main(void)
     draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.9f, 0.0f, 1.0f, 0.0f, 1.0f);
     present();
     check_rgb("fog off: identity restored", 0, 255, 0);
+
+    /* 24/25: separate V4 array pointers (VertexPointer/ColorPointer/
+     * TexCoordPointer + DrawElements -- the MiniGL path) */
+    IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+    rc = draw_quad_sep(0, 0, (float)RT_W, (float)RT_H, 0.5f,
+                       0.0f, 1.0f, 0.0f, 1.0f);
+    NOTE("draw_quad_sep rc=%lu", (unsigned long)rc);
+    present();
+    check_rgb("separate arrays: gouraud", 0, 255, 0);
+    if (tex_blue) {
+        IW3D->W3D_BindTexture(g_ctx, 0, tex_blue);
+        IW3D->W3D_SetTexEnv(g_ctx, tex_blue, W3D_REPLACE, NULL);
+        IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+        draw_quad_sep(0, 0, (float)RT_W, (float)RT_H, 0.5f,
+                      1.0f, 1.0f, 1.0f, 1.0f);
+        present();
+        check_rgb("separate arrays: textured (TexCoordPointer)", 0, 0, 255);
+        IW3D->W3D_BindTexture(g_ctx, 0, NULL);
+    }
 
     /* --- 8b telemetry: what does the FE claim for the not-yet-done set? --- */
     NOTE("INFO SetState rc: FOG=%lu ALPHATEST=%lu CULL=%lu STENCIL=%lu (0=accepted)",

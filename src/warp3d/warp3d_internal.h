@@ -158,6 +158,16 @@ struct W3DVirgl {
     BOOL         ia_has_tcoord; uint32 ia_tcoord_off;
     BOOL         ia_has_fog;    uint32 ia_fog_off;   /* W3D_FOG_INTERPOLATED */
 
+    /* Per-draw gather view resolved by w3d_DrawElements: either the
+     * interleaved array above, or the SEPARATE V4 pointers the FE records in
+     * the public context (VertexPointer/ColorPointer/TexCoordPointer[0] --
+     * the MiniGL path; TexCoordPointer support = the old R4 note).  NULL
+     * base = attribute absent. */
+    const UBYTE *ga_pos;  int ga_pos_st;
+    const UBYTE *ga_col;  int ga_col_st;  BOOL ga_col_ubyte;
+    const UBYTE *ga_tc;   int ga_tc_st;   uint32 ga_tc_voff;
+    const UBYTE *ga_fog;  int ga_fog_st;  /* per-vertex fog coord or NULL */
+
     /* Heap command buffer for large indexed draws (too big for the stack). */
     uint32      *cmdbuf;        /* CMDBUF_DWORDS words (= 64 KiB) */
 

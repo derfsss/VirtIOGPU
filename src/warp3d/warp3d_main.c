@@ -422,8 +422,9 @@ static float exp_neg(float x)
 }
 
 /* GL-style fog factor from the vertex's screen z (or the per-vertex fog
- * coordinate for W3D_FOG_INTERPOLATED).  1 = unfogged, 0 = full fog. */
-static float fog_factor(const struct W3DVirgl *wv, const UBYTE *v, float z)
+ * coordinate for W3D_FOG_INTERPOLATED, fogp = gather-view pointer or NULL).
+ * 1 = unfogged, 0 = full fog. */
+static float fog_factor(const struct W3DVirgl *wv, const UBYTE *fogp, float z)
 {
     float f;
     switch (wv->fog_mode) {
@@ -436,7 +437,7 @@ static float fog_factor(const struct W3DVirgl *wv, const UBYTE *v, float z)
         break;
     }
     case W3D_FOG_INTERPOLATED:
-        f = wv->ia_has_fog ? *(const float *)(v + wv->ia_fog_off) : 1.0f;
+        f = fogp ? *(const float *)fogp : 1.0f;
         break;
     default: {  /* W3D_FOG_LINEAR -- W3D fog ranges DECREASE with distance
                  * (the FE's SetFogParams validation REQUIRES start > end,
@@ -451,6 +452,25 @@ static float fog_factor(const struct W3DVirgl *wv, const UBYTE *v, float z)
     }
     if (f < 0.0f) f = 0.0f; else if (f > 1.0f) f = 1.0f;
     return f;
+}
+
+/* Read a vertex colour from the gather view (float RGBA, or ubyte RGBA when
+ * the V4 ColorPointer said W3D_COLOR_UBYTE).  NULL -> opaque white. */
+static void ga_read_color(const struct W3DVirgl *wv, const UBYTE *cp, float out[4])
+{
+    if (!cp) {
+        out[0] = out[1] = out[2] = out[3] = 1.0f;
+        return;
+    }
+    if (wv->ga_col_ubyte) {
+        out[0] = (float)cp[0] / 255.0f;
+        out[1] = (float)cp[1] / 255.0f;
+        out[2] = (float)cp[2] / 255.0f;
+        out[3] = (float)cp[3] / 255.0f;
+    } else {
+        const float *c = (const float *)cp;
+        out[0] = c[0]; out[1] = c[1]; out[2] = c[2]; out[3] = c[3];
+    }
 }
 
 /* Resolve the sampler for a textured draw: the texture's private sampler
@@ -1173,6 +1193,9 @@ uint32 w3d_VertexPointer(struct Warp3DIFace *Self, W3D_Context *ctx,
     wv->vtx_ptr    = (const UBYTE *)p;
     wv->vtx_stride = stride ? stride : (int)sizeof(W3D_Vertex);
     wv->vtx_mode   = mode;
+    /* the app switched to separate V4 arrays -- stop shadowing them with a
+     * stale interleaved pointer (DrawElements prefers ia when set) */
+    wv->ia_ptr = NULL;
     return W3D_SUCCESS;
 }
 
@@ -1515,15 +1538,16 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
     struct VirglVertexBuffer vb;
     float fbw = (float)wv->fb_w, fbh = (float)wv->fb_h;
     uint32 i, num_floats;
-    /* Textured draw if a texture is bound and the array carries texcoords. */
-    struct W3DTexInfo *ti = (wv->cur_tex && wv->cur_tex->driver && wv->ia_has_tcoord)
+    /* Textured draw if a texture is bound and the gather view has texcoords
+     * (interleaved array OR the separate V4 TexCoordPointer). */
+    struct W3DTexInfo *ti = (wv->cur_tex && wv->cur_tex->driver && wv->ga_tc)
                             ? (struct W3DTexInfo *)wv->cur_tex->driver : NULL;
     /* WIDE combine path: textured + (non-REPLACE texenv OR fogging) + the
      * 3-attr objects exist + the array carries colour.  Else the EXACT
      * original 8-float/stride-32 path runs (plain REPLACE + untextured =
      * R8-safe, byte-identical; untextured fog is pre-mixed on the CPU). */
     BOOL wide = (ti && (wv->texenv_mode != W3D_REPLACE || wv->fog_on) &&
-                 wv->ia_has_color &&
+                 wv->ga_col != NULL &&
                  wv->info.vs3_handle && wv->info.ve3_handle &&
                  ((wv->texenv_mode == W3D_MODULATE && wv->info.fs_modulate_handle) ||
                   (wv->texenv_mode == W3D_DECAL    && wv->info.fs_decal_handle)    ||
@@ -1596,56 +1620,60 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
 
     for (i = 0; i < nverts; i++) {
         uint32 idx;
-        const UBYTE *v;
+        const UBYTE *vp, *cp, *tp, *fp;
+        float x, y, z;
         if      (idx_size == 4) idx = ((const uint32 *)idx_base)[first + i];
         else if (idx_size == 2) idx = ((const UWORD  *)idx_base)[first + i];
         else                    idx = ((const UBYTE  *)idx_base)[first + i];
-        v = wv->ia_ptr + idx * (uint32)wv->ia_stride;
+        /* gather view: interleaved array or the separate V4 pointers */
+        vp = wv->ga_pos + idx * (uint32)wv->ga_pos_st;
+        cp = wv->ga_col ? wv->ga_col + idx * (uint32)wv->ga_col_st : NULL;
+        tp = wv->ga_tc  ? wv->ga_tc  + idx * (uint32)wv->ga_tc_st  : NULL;
+        fp = wv->ga_fog ? wv->ga_fog + idx * (uint32)wv->ga_fog_st : NULL;
 
-        {
-            float x = *(const float *)(v + 0);
-            float y = *(const float *)(v + 4);
-            float z = *(const float *)(v + 8);   /* screen z (~[0,0.8]) */
-            virgl_emit_float(&cbuf, 2.0f * x / fbw - 1.0f);   /* ndc x */
-            virgl_emit_float(&cbuf, 2.0f * y / fbh - 1.0f);   /* ndc y (backend present blit is NOT Y-flipped) */
-            virgl_emit_float(&cbuf, z);                       /* ndc z -> depth */
-            virgl_emit_float(&cbuf, 1.0f);                    /* w */
-        }
+        x = ((const float *)vp)[0];
+        y = ((const float *)vp)[1];
+        z = ((const float *)vp)[2];   /* screen z (~[0,0.8]) */
+        virgl_emit_float(&cbuf, 2.0f * x / fbw - 1.0f);   /* ndc x */
+        virgl_emit_float(&cbuf, 2.0f * y / fbh - 1.0f);   /* ndc y (backend present blit is NOT Y-flipped) */
+        virgl_emit_float(&cbuf, z);                       /* ndc z -> depth */
+        virgl_emit_float(&cbuf, 1.0f);                    /* w */
+
         if (wide) {
             /* GENERIC[0]=texcoord (+fog factor in .z), GENERIC[1]=colour. */
-            const float *t = (const float *)(v + wv->ia_tcoord_off);
-            const float *c = (const float *)(v + wv->ia_color_off);
-            float ff = wv->fog_on
-                       ? fog_factor(wv, v, *(const float *)(v + 8)) : 1.0f;
-            virgl_emit_float(&cbuf, t[0]); virgl_emit_float(&cbuf, t[1]);
+            float c4[4];
+            float ff = wv->fog_on ? fog_factor(wv, fp, z) : 1.0f;
+            ga_read_color(wv, cp, c4);
+            virgl_emit_float(&cbuf, ((const float *)tp)[0]);
+            virgl_emit_float(&cbuf, *(const float *)(tp + wv->ga_tc_voff));
             virgl_emit_float(&cbuf, ff);   virgl_emit_float(&cbuf, 1.0f);
-            virgl_emit_float(&cbuf, c[0]); virgl_emit_float(&cbuf, c[1]);
-            virgl_emit_float(&cbuf, c[2]); virgl_emit_float(&cbuf, c[3]);
+            virgl_emit_float(&cbuf, c4[0]); virgl_emit_float(&cbuf, c4[1]);
+            virgl_emit_float(&cbuf, c4[2]); virgl_emit_float(&cbuf, c4[3]);
         } else if (ti) {
             /* texcoord -> GENERIC[0]; FS_TEX samples .xy.  V follows the
              * geometry (the NDC Y-flip is a rigid flip; per-vertex UVs ride
              * along with it), so do NOT flip V here. */
-            const float *t = (const float *)(v + wv->ia_tcoord_off);
-            virgl_emit_float(&cbuf, t[0]);   /* u */
-            virgl_emit_float(&cbuf, t[1]);   /* v */
+            virgl_emit_float(&cbuf, ((const float *)tp)[0]);   /* u */
+            virgl_emit_float(&cbuf, *(const float *)(tp + wv->ga_tc_voff));
             virgl_emit_float(&cbuf, 0.0f);
             virgl_emit_float(&cbuf, 1.0f);
-        } else if (wv->ia_has_color) {
+        } else if (cp) {
             /* untextured: fog pre-mixed into the vertex colour on the CPU
              * (per-vertex fog, linearly interpolated -- GL fixed-function
              * semantics; alpha stays unfogged) */
-            const float *c = (const float *)(v + wv->ia_color_off);
+            float c4[4];
+            ga_read_color(wv, cp, c4);
             if (wv->fog_on) {
-                float ff = fog_factor(wv, v, *(const float *)(v + 8));
-                virgl_emit_float(&cbuf, ff * c[0] + (1.0f - ff) * wv->fog_color[0]);
-                virgl_emit_float(&cbuf, ff * c[1] + (1.0f - ff) * wv->fog_color[1]);
-                virgl_emit_float(&cbuf, ff * c[2] + (1.0f - ff) * wv->fog_color[2]);
+                float ff = fog_factor(wv, fp, z);
+                virgl_emit_float(&cbuf, ff * c4[0] + (1.0f - ff) * wv->fog_color[0]);
+                virgl_emit_float(&cbuf, ff * c4[1] + (1.0f - ff) * wv->fog_color[1]);
+                virgl_emit_float(&cbuf, ff * c4[2] + (1.0f - ff) * wv->fog_color[2]);
             } else {
-                virgl_emit_float(&cbuf, c[0]);
-                virgl_emit_float(&cbuf, c[1]);
-                virgl_emit_float(&cbuf, c[2]);
+                virgl_emit_float(&cbuf, c4[0]);
+                virgl_emit_float(&cbuf, c4[1]);
+                virgl_emit_float(&cbuf, c4[2]);
             }
-            virgl_emit_float(&cbuf, c[3]);
+            virgl_emit_float(&cbuf, c4[3]);
         } else {
             virgl_emit_float(&cbuf, 1.0f); virgl_emit_float(&cbuf, 1.0f);
             virgl_emit_float(&cbuf, 1.0f); virgl_emit_float(&cbuf, 1.0f);
@@ -1743,6 +1771,31 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
      * June 2026 grey-window freeze.  REPLACE path = 8 floats/vert -> 1998
      * (=666*3), unchanged and historically proven. */
     CHUNK = (wv->texenv_mode != W3D_REPLACE || wv->fog_on) ? 1338U : 1998U;
+    /* Resolve the gather view: the interleaved array when one is set, else
+     * the SEPARATE V4 pointers the FE records in the public context
+     * (VertexPointer/ColorPointer/TexCoordPointer[0] -- the MiniGL path;
+     * TexCoordPointer support closes the old R4 note). */
+    if (wv->ia_ptr) {
+        wv->ga_pos = wv->ia_ptr;                wv->ga_pos_st = wv->ia_stride;
+        wv->ga_col = wv->ia_has_color  ? wv->ia_ptr + wv->ia_color_off  : NULL;
+        wv->ga_col_st = wv->ia_stride;          wv->ga_col_ubyte = FALSE;
+        wv->ga_tc  = wv->ia_has_tcoord ? wv->ia_ptr + wv->ia_tcoord_off : NULL;
+        wv->ga_tc_st = wv->ia_stride;           wv->ga_tc_voff = 4;
+        wv->ga_fog = wv->ia_has_fog    ? wv->ia_ptr + wv->ia_fog_off    : NULL;
+        wv->ga_fog_st = wv->ia_stride;
+    } else if (ctx->VertexPointer) {
+        wv->ga_pos = (const UBYTE *)ctx->VertexPointer;
+        wv->ga_pos_st = ctx->VPStride ? ctx->VPStride : 12;
+        wv->ga_col = (const UBYTE *)ctx->ColorPointer;
+        wv->ga_col_st = ctx->CPStride ? ctx->CPStride : 16;
+        wv->ga_col_ubyte = (ctx->CPMode & W3D_COLOR_UBYTE) != 0;
+        wv->ga_tc = (const UBYTE *)ctx->TexCoordPointer[0];
+        wv->ga_tc_st = ctx->TPStride[0] ? ctx->TPStride[0] : 8;
+        wv->ga_tc_voff = ctx->TPVOffs[0] ? (uint32)ctx->TPVOffs[0] : 4;
+        wv->ga_fog = NULL; wv->ga_fog_st = 0;  /* FogCoordPointer: later */
+    } else {
+        wv->ga_pos = NULL;
+    }
     /* Transition-only census: one line per texenv MODE CHANGE tells us which
      * path (WIDE combine vs narrow REPLACE) a real workload actually runs --
      * the June grey-window revert lacked exactly this visibility. */
@@ -1753,7 +1806,7 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
         wv->texenv_mode_logged = wv->texenv_mode;
     }
     DW3D("DrawElements: prim=%lu count=%lu\n", (unsigned long)prim, (unsigned long)count);
-    if (!wv->ia_ptr || !indices || count == 0) return W3D_ILLEGALINPUT;
+    if (!wv->ga_pos || !indices || count == 0) return W3D_ILLEGALINPUT;
     if (!wv->cmdbuf) return W3D_NOMEMORY;
 
     idx_size  = (type == W3D_INDEX_ULONG) ? 4 : (type == W3D_INDEX_UWORD) ? 2 : 1;

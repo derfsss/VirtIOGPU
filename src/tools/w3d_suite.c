@@ -182,6 +182,54 @@ static W3D_Texture *make_tex(UBYTE r, UBYTE g, UBYTE b, UBYTE a)
     return tex;
 }
 
+/* Left half solid red, right half solid blue -- the u=0.5 boundary lands on
+ * the screen centre, so NEAREST reads a pure texel while LINEAR mixes:
+ * the one texture that makes the filter mode visible to a single readback. */
+static W3D_Texture *make_tex_halves(void)
+{
+    uint32 err = 0;
+    int x, y;
+    W3D_Texture *tex;
+    for (y = 0; y < TEX_H; y++)
+        for (x = 0; x < TEX_W; x++) {
+            UBYTE *p = (UBYTE *)&tex_pixels[y * TEX_W + x];
+            p[0] = (x < TEX_W / 2) ? 255 : 0;  /* r */
+            p[1] = 0;                          /* g */
+            p[2] = (x < TEX_W / 2) ? 0 : 255;  /* b */
+            p[3] = 255;                        /* a */
+        }
+    tex = IW3D->W3D_AllocTexObjTags(g_ctx, &err,
+                                    W3D_ATO_IMAGE,  tex_pixels,
+                                    W3D_ATO_FORMAT, W3D_R8G8B8A8,
+                                    W3D_ATO_WIDTH,  TEX_W,
+                                    W3D_ATO_HEIGHT, TEX_H,
+                                    TAG_DONE);
+    if (!tex)
+        NOTE("AllocTexObjTags(halves) FAILED err=%lu", (unsigned long)err);
+    return tex;
+}
+
+/* Filter check: at the red/blue boundary a NEAREST sample is pure (one
+ * channel saturated) while a LINEAR sample is a mix (both mid-range). */
+static void check_filter(const char *name, BOOL expect_mixed)
+{
+    int r = -1, g = -1, b = -1;
+    BOOL okread = read_rgb(RT_W / 2, RT_H / 2, &r, &g, &b);
+    BOOL mixed = okread && (r > 40 && r < 215 && b > 40 && b < 215);
+    BOOL pure  = okread && ((r > 215 && b < 40) || (r < 40 && b > 215));
+    BOOL pass  = expect_mixed ? mixed : pure;
+    g_checks++;
+    if (!pass) g_fails++;
+    {
+        char line[256];
+        snprintf(line, sizeof(line), "%s %2d %s: got(%d,%d,%d) expected %s",
+                 pass ? "ok  " : "FAIL", g_checks, name, r, g, b,
+                 expect_mixed ? "mixed r+b" : "pure r or b");
+        printf("%s\n", line);
+        IExec->DebugPrintF("[w3d_suite] %s\n", line);
+    }
+}
+
 /* ---- calibration ------------------------------------------------------- */
 
 static uint32 draw_quad(float x0, float y0, float x1, float y1, float z,
@@ -225,7 +273,7 @@ int main(void)
 {
     struct Library     *W3DBase = NULL;
     struct Screen      *scr = NULL;
-    W3D_Texture        *tex_blue = NULL, *tex_white = NULL;
+    W3D_Texture        *tex_blue = NULL, *tex_white = NULL, *tex_halves = NULL;
     W3D_Color           envcol;
     uint32              err = 0, rc;
 
@@ -378,6 +426,89 @@ int main(void)
     check_rgb("alpha blend 50% white over black", 127, 127, 127);
     IW3D->W3D_SetState(g_ctx, W3D_BLENDING, W3D_DISABLE);
 
+    /* --- 8b batch 1: alpha test, colour mask, cull, lines, filter --- */
+
+    /* 10/11: alpha test GREATER 0.5 -- a=0.25 quad discarded, a=0.75 drawn */
+    {
+        W3D_Float aref = 0.5f;
+        rc = IW3D->W3D_SetAlphaMode(g_ctx, W3D_A_GREATER, &aref);
+        NOTE("SetAlphaMode(GREATER,0.5) rc=%lu", (unsigned long)rc);
+    }
+    IW3D->W3D_SetState(g_ctx, W3D_ALPHATEST, W3D_ENABLE);
+    IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+    draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.5f, 1.0f, 0.0f, 0.0f, 0.25f);
+    present();
+    check_rgb("alpha test discards a=0.25", 0, 0, 0);
+    IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+    draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.5f, 0.0f, 1.0f, 0.0f, 0.75f);
+    present();
+    check_rgb("alpha test passes a=0.75", 0, 255, 0);
+    IW3D->W3D_SetState(g_ctx, W3D_ALPHATEST, W3D_DISABLE);
+
+    /* 12: colour mask -- red channel write disabled, white draw = cyan */
+    rc = IW3D->W3D_SetColorMask(g_ctx, FALSE, TRUE, TRUE, TRUE);
+    NOTE("SetColorMask(0,1,1,1) rc=%lu", (unsigned long)rc);
+    IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+    draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.5f, 1.0f, 1.0f, 1.0f, 1.0f);
+    present();
+    check_rgb("colour mask blocks red channel", 0, 255, 255);
+    IW3D->W3D_SetColorMask(g_ctx, TRUE, TRUE, TRUE, TRUE);
+
+    /* 13/14: backface cull -- our quads are CCW in NDC; with front=CCW the
+     * quad survives a back-cull, with front=CW it IS the back face */
+    IW3D->W3D_SetFrontFace(g_ctx, W3D_CCW);
+    IW3D->W3D_SetState(g_ctx, W3D_CULLFACE, W3D_ENABLE);
+    IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+    draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.5f, 0.0f, 1.0f, 0.0f, 1.0f);
+    present();
+    check_rgb("cull back keeps CCW front face", 0, 255, 0);
+    IW3D->W3D_SetFrontFace(g_ctx, W3D_CW);
+    IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+    draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.5f, 0.0f, 1.0f, 0.0f, 1.0f);
+    present();
+    check_rgb("cull removes CW-front (now back) face", 0, 0, 0);
+    IW3D->W3D_SetState(g_ctx, W3D_CULLFACE, W3D_DISABLE);
+    IW3D->W3D_SetFrontFace(g_ctx, W3D_CCW);
+
+    /* 15: LINES primitive -- white horizontal line through the centre row */
+    {
+        static struct SVert lverts[2];
+        static uint16 lidx[2] = { 0, 1 };
+        set_vert(&lverts[0], 0.0f,        (float)(RT_H / 2), 0.5f,
+                 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f);
+        set_vert(&lverts[1], (float)RT_W, (float)(RT_H / 2), 0.5f,
+                 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f);
+        IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+        IW3D->W3D_InterleavedArray(g_ctx, lverts, sizeof(struct SVert),
+                                   W3D_VFORMAT_COLOR | W3D_VFORMAT_TCOORD_0, 0);
+        rc = IW3D->W3D_DrawElements(g_ctx, W3D_PRIMITIVE_LINES,
+                                    W3D_INDEX_UWORD, 2, lidx);
+        NOTE("DrawElements(LINES) rc=%lu", (unsigned long)rc);
+        present();
+        check_rgb("LINES primitive draws centre row", 255, 255, 255);
+    }
+
+    /* 16/17: texture filter -- boundary sample pure under NEAREST, mixed
+     * under LINEAR (half-red/half-blue texture, REPLACE) */
+    tex_halves = make_tex_halves();
+    if (tex_halves) {
+        IW3D->W3D_BindTexture(g_ctx, 0, tex_halves);
+        IW3D->W3D_SetTexEnv(g_ctx, tex_halves, W3D_REPLACE, NULL);
+        rc = IW3D->W3D_SetFilter(g_ctx, tex_halves, W3D_NEAREST, W3D_NEAREST);
+        NOTE("SetFilter(NEAREST) rc=%lu", (unsigned long)rc);
+        IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+        draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.5f, 1.0f, 1.0f, 1.0f, 1.0f);
+        present();
+        check_filter("filter NEAREST pure at texel boundary", FALSE);
+        rc = IW3D->W3D_SetFilter(g_ctx, tex_halves, W3D_LINEAR, W3D_LINEAR);
+        NOTE("SetFilter(LINEAR) rc=%lu", (unsigned long)rc);
+        IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+        draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.5f, 1.0f, 1.0f, 1.0f, 1.0f);
+        present();
+        check_filter("filter LINEAR mixes at texel boundary", TRUE);
+        IW3D->W3D_BindTexture(g_ctx, 0, NULL);
+    }
+
     /* --- 8b telemetry: what does the FE claim for the not-yet-done set? --- */
     NOTE("INFO SetState rc: FOG=%lu ALPHATEST=%lu CULL=%lu STENCIL=%lu (0=accepted)",
          (unsigned long)IW3D->W3D_SetState(g_ctx, W3D_FOGGING,       W3D_ENABLE),
@@ -399,8 +530,9 @@ summary:
     }
 
 out:
-    if (tex_blue)  IW3D->W3D_FreeTexObj(g_ctx, tex_blue);
-    if (tex_white) IW3D->W3D_FreeTexObj(g_ctx, tex_white);
+    if (tex_blue)   IW3D->W3D_FreeTexObj(g_ctx, tex_blue);
+    if (tex_white)  IW3D->W3D_FreeTexObj(g_ctx, tex_white);
+    if (tex_halves) IW3D->W3D_FreeTexObj(g_ctx, tex_halves);
     if (g_ctx)     IW3D->W3D_DestroyContext(g_ctx);
     if (IW3D)      IExec->DropInterface((struct Interface *)IW3D);
     if (W3DBase)   IExec->CloseLibrary(W3DBase);

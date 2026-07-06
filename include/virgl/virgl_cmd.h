@@ -262,6 +262,7 @@ struct ChipGPUState;
 #define VIRGL_RS_S0_FILL_FRONT(x)       (((x) & 0x3) << 10)
 #define VIRGL_RS_S0_FILL_BACK(x)        (((x) & 0x3) << 12)
 #define VIRGL_RS_S0_SCISSOR(x)          (((x) & 0x1) << 14)
+#define VIRGL_RS_S0_FRONT_CCW(x)        (((x) & 0x1) << 15)
 #define VIRGL_RS_S0_MULTISAMPLE(x)      (((x) & 0x1) << 25)
 #define VIRGL_RS_S0_FORCE_PERSAMPLE(x)  (((x) & 0x1) << 31)
 

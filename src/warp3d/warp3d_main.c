@@ -324,15 +324,26 @@ static uint32 w3d_blendfactor(uint32 w)
     }
 }
 
-#define W3D_HANDLE_BLEND_OPAQUE  310   /* COLORMASK only, no blend */
-#define W3D_HANDLE_BLEND_FUNC    311   /* app's W3D_SetBlendMode factors */
+#define W3D_HANDLE_BLEND_OPAQUE  310   /* COLORMASK only, no blend (+313 twin) */
+#define W3D_HANDLE_BLEND_FUNC    311   /* app's W3D_SetBlendMode factors (+312 twin) */
+#define W3D_HANDLE_DSA_ALPHA     315   /* depth+alpha-test DSA (+317 twin) */
+#define W3D_HANDLE_RAST          316   /* W3D rasterizer: cull/frontface (+318 twin) */
 
-/* Refresh the app-blend object when its factors changed, then bind opaque or
- * blend per the W3D_BLENDING enable.  Appended into the draw's command buffer
- * (so create+bind reach the host before the DRAW_VBO). */
+/* virgl objects are immutable: a state change creates the NEW object on the
+ * twin handle, binds it, then destroys the old -- never create over a live
+ * handle, never destroy a possibly-bound one. */
+static uint32 handle_flip(uint32 live, uint32 a, uint32 b)
+{
+    return (live == a) ? b : a;
+}
+
+/* Refresh the blend objects when factors or the colour mask changed, then
+ * bind opaque or blend per the W3D_BLENDING enable.  Appended into the draw's
+ * command buffer (so create+bind reach the host before the DRAW_VBO). */
 static void bind_blend(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
 {
-    if (wv->blend_funcs_dirty) {
+    uint32 mask = wv->color_mask & 0xF;
+    if (wv->blend_funcs_dirty || wv->blend_mask_dirty) {
         uint32 s = w3d_blendfactor(wv->src_blend);
         uint32 d = w3d_blendfactor(wv->dst_blend);
         uint32 rt0 = VIRGL_BLEND_RT_BLEND_ENABLE(1)
@@ -342,12 +353,131 @@ static void bind_blend(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
                    | VIRGL_BLEND_RT_ALPHA_FUNC(PIPE_BLEND_ADD)
                    | VIRGL_BLEND_RT_ALPHA_SRC_FACTOR(s)
                    | VIRGL_BLEND_RT_ALPHA_DST_FACTOR(d)
-                   | VIRGL_BLEND_RT_COLORMASK(0xF);
-        virgl_cmd_create_blend(cbuf, W3D_HANDLE_BLEND_FUNC, 0, rt0);
+                   | VIRGL_BLEND_RT_COLORMASK(mask);
+        uint32 nh = handle_flip(wv->blend_func_h, W3D_HANDLE_BLEND_FUNC,
+                                W3D_HANDLE_BLEND_FUNC + 1);
+        virgl_cmd_create_blend(cbuf, nh, 0, rt0);
+        if (wv->blend_func_h)
+            virgl_cmd_destroy_object(cbuf, VIRGL_OBJECT_BLEND, wv->blend_func_h);
+        wv->blend_func_h = nh;
         wv->blend_funcs_dirty = FALSE;
     }
+    if (wv->blend_mask_dirty) {
+        uint32 nh = handle_flip(wv->blend_opaque_h, W3D_HANDLE_BLEND_OPAQUE,
+                                W3D_HANDLE_BLEND_OPAQUE + 3);
+        virgl_cmd_create_blend(cbuf, nh, 0, VIRGL_BLEND_RT_COLORMASK(mask));
+        if (wv->blend_opaque_h)
+            virgl_cmd_destroy_object(cbuf, VIRGL_OBJECT_BLEND, wv->blend_opaque_h);
+        wv->blend_opaque_h = nh;
+        wv->blend_mask_dirty = FALSE;
+    }
     virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_BLEND,
-        wv->blend_on ? W3D_HANDLE_BLEND_FUNC : W3D_HANDLE_BLEND_OPAQUE);
+        wv->blend_on ? wv->blend_func_h : wv->blend_opaque_h);
+}
+
+/* Bind the DSA for the current depth + alpha-test state.  Without alpha test
+ * the three static objects (300/301/302) cover every depth combination; with
+ * it a dynamic object carries depth bits + alpha func + ref (twin-handle
+ * recreate only when the effective state actually changed). */
+static void bind_dsa(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
+{
+    if (!wv->dsa_handle) return;
+    if (wv->alpha_on && wv->alpha_func) {
+        uint32 s0 = (wv->depth_test
+                       ? (VIRGL_DSA_S0_DEPTH_ENABLE(1) |
+                          VIRGL_DSA_S0_DEPTH_WRITEMASK(wv->depth_write ? 1 : 0) |
+                          VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_LESS))
+                       : (VIRGL_DSA_S0_DEPTH_ENABLE(1) |
+                          VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_ALWAYS)))
+                  | VIRGL_DSA_S0_ALPHA_ENABLE(1)
+                  | VIRGL_DSA_S0_ALPHA_FUNC(wv->alpha_func);
+        if (!wv->dsa_alpha_h || s0 != wv->dsa_alpha_s0 ||
+            wv->alpha_ref != wv->dsa_alpha_ref) {
+            uint32 nh = handle_flip(wv->dsa_alpha_h, W3D_HANDLE_DSA_ALPHA,
+                                    W3D_HANDLE_DSA_ALPHA + 2);
+            virgl_cmd_create_dsa(cbuf, nh, s0, 0, 0, wv->alpha_ref);
+            if (wv->dsa_alpha_h)
+                virgl_cmd_destroy_object(cbuf, VIRGL_OBJECT_DSA, wv->dsa_alpha_h);
+            wv->dsa_alpha_h  = nh;
+            wv->dsa_alpha_s0 = s0;
+            wv->dsa_alpha_ref = wv->alpha_ref;
+        }
+        virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_DSA, wv->dsa_alpha_h);
+    } else {
+        virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_DSA,
+            wv->depth_test ? (wv->depth_write ? 300 : 301) : 302);
+    }
+}
+
+/* Resolve the sampler for a textured draw: the texture's private sampler
+ * (rebuilt lazily HERE, inside the draw's cbuf, when W3D_SetFilter /
+ * W3D_SetWrapMode changed it) or the chip's shared linear sampler when the
+ * app never touched filter/wrap (preserves the proven default). */
+static uint32 w3d_wrapmode(uint32 w)
+{
+    switch (w) {
+    case W3D_REPEAT:     return PIPE_TEX_WRAP_REPEAT;
+    case W3D_CLAMP_LAST: return PIPE_TEX_WRAP_CLAMP_TO_EDGE;
+    case 3:              return PIPE_TEX_WRAP_CLAMP_TO_BORDER; /* W3D_CLAMP_BORDER_COLOR */
+    default:             return PIPE_TEX_WRAP_CLAMP_TO_EDGE;   /* chip default */
+    }
+}
+static uint32 tex_sampler(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv,
+                          struct W3DTexInfo *ti)
+{
+    if (ti->sampler_dirty) {
+        /* image filter: any W3D_NEAREST* variant -> NEAREST, else LINEAR
+         * (mip variants collapse -- no mipmaps are uploaded yet) */
+        uint32 fmin = (ti->filter_min == W3D_NEAREST ||
+                       ti->filter_min == W3D_NEAREST_MIP_NEAREST ||
+                       ti->filter_min == W3D_NEAREST_MIP_LINEAR ||
+                       ti->filter_min == W3D_ANISOTROPIC_NEAREST)
+                      ? PIPE_TEX_FILTER_NEAREST : PIPE_TEX_FILTER_LINEAR;
+        uint32 fmag = (ti->filter_mag == W3D_NEAREST)
+                      ? PIPE_TEX_FILTER_NEAREST : PIPE_TEX_FILTER_LINEAR;
+        uint32 ws = w3d_wrapmode(ti->wrap_s), wt = w3d_wrapmode(ti->wrap_t);
+        uint32 s0 = VIRGL_SAMPLER_S0_WRAP_S(ws)
+                  | VIRGL_SAMPLER_S0_WRAP_T(wt)
+                  | VIRGL_SAMPLER_S0_WRAP_R(ws)
+                  | VIRGL_SAMPLER_S0_MIN_IMG_FILTER(fmin)
+                  | VIRGL_SAMPLER_S0_MIN_MIP_FILTER(PIPE_TEX_MIPFILTER_NONE)
+                  | VIRGL_SAMPLER_S0_MAG_IMG_FILTER(fmag);
+        uint32 nh = wv->sampler_next++;
+        virgl_cmd_create_sampler_state(cbuf, nh, s0, 0.0f, 0.0f, 0.0f,
+                                       ti->border[0], ti->border[1],
+                                       ti->border[2], ti->border[3]);
+        if (ti->sampler)
+            virgl_cmd_destroy_object(cbuf, VIRGL_OBJECT_SAMPLER_STATE,
+                                     ti->sampler);
+        ti->sampler = nh;
+        ti->sampler_dirty = 0;
+    }
+    return ti->sampler ? ti->sampler : wv->info.sampler_linear;
+}
+
+/* Bind the W3D rasterizer: clone of the chip's base state (depth clip, fill,
+ * SCISSOR) plus backface cull + front-face winding.  Bound on EVERY draw so
+ * turning cull off deterministically restores a no-cull object. */
+static void bind_rasterizer(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
+{
+    uint32 s0 = VIRGL_RS_S0_DEPTH_CLIP(1)
+              | VIRGL_RS_S0_CULL_FACE(wv->cull_on ? PIPE_FACE_BACK
+                                                  : PIPE_FACE_NONE)
+              | VIRGL_RS_S0_FILL_FRONT(PIPE_POLYGON_MODE_FILL)
+              | VIRGL_RS_S0_FILL_BACK(PIPE_POLYGON_MODE_FILL)
+              | VIRGL_RS_S0_SCISSOR(1)
+              | VIRGL_RS_S0_FRONT_CCW(wv->front_ccw ? 1 : 0);
+    if (!wv->rast_h || s0 != wv->rast_s0) {
+        uint32 nh = handle_flip(wv->rast_h, W3D_HANDLE_RAST,
+                                W3D_HANDLE_RAST + 2);
+        virgl_cmd_create_rasterizer(cbuf, nh, s0, 1.0f, 0, 0,
+                                    1.0f, 0.0f, 0.0f, 0.0f);
+        if (wv->rast_h)
+            virgl_cmd_destroy_object(cbuf, VIRGL_OBJECT_RASTERIZER, wv->rast_h);
+        wv->rast_h  = nh;
+        wv->rast_s0 = s0;
+    }
+    virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_RASTERIZER, wv->rast_h);
 }
 
 static void bind_rt_framebuffer(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
@@ -363,14 +493,11 @@ static void bind_rt_framebuffer(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
     virgl_cmd_set_viewport(cbuf, 0, hw, hh, 0.5f, hw, hh, 0.5f);
     /* scissor >= RT so it never clips (the chip left it at scanout size) */
     virgl_cmd_set_scissor_state(cbuf, 0, 0, 0, wv->fb_w, wv->fb_h);
-    /* bind the DSA matching the app's W3D_ZBUFFER/ZBUFFERUPDATE state:
-     * 300=test+write, 301=test+no-write, 302=depth off.  (302 lets a 2D blended
-     * overlay -- e.g. the cow's Cosmos pass -- composite over the scene.) */
-    if (wv->dsa_handle)
-        virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_DSA,
-            wv->depth_test ? (wv->depth_write ? 300 : 301) : 302);
-    /* bind blend state (opaque, or the app's W3D_SetBlendMode factors) */
+    /* DSA (depth + alpha test), blend (factors + colour mask), rasterizer
+     * (cull + winding) -- each rebuilt on demand via twin handles */
+    bind_dsa(cbuf, wv);
     bind_blend(cbuf, wv);
+    bind_rasterizer(cbuf, wv);
 }
 
 /* Frame boundary (called from ClearBuffers/ClearDrawRegion): if geometry was
@@ -606,6 +733,17 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
         uint32 bw2[64]; struct VirglCmdBuf bcb;   /* 2x create_blend = 24 words */
         wv->src_blend = W3D_ONE; wv->dst_blend = W3D_ONE;
         wv->blend_on = FALSE; wv->blend_funcs_dirty = FALSE;
+        /* 8b dynamic-state defaults: full colour mask, CCW front faces, no
+         * private objects yet (twin-handle recreate builds them on demand) */
+        wv->color_mask = 0xF;
+        wv->blend_mask_dirty = FALSE;
+        wv->blend_opaque_h = W3D_HANDLE_BLEND_OPAQUE;
+        wv->blend_func_h   = W3D_HANDLE_BLEND_FUNC;
+        wv->alpha_func = 0; wv->alpha_ref = 0.0f; wv->alpha_on = FALSE;
+        wv->dsa_alpha_h = 0;
+        wv->cull_on = FALSE; wv->front_ccw = TRUE;
+        wv->rast_h = 0;
+        wv->sampler_next = 340;
         virgl_cmd_init(&bcb, bw2, 64);
         virgl_cmd_create_blend(&bcb, W3D_HANDLE_BLEND_OPAQUE, 0, VIRGL_BLEND_RT_OPAQUE);
         virgl_cmd_create_blend(&bcb, W3D_HANDLE_BLEND_FUNC, 0,
@@ -818,6 +956,106 @@ uint32 w3d_SetBlendMode(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 s, ui
         wv->src_blend = s; wv->dst_blend = d;
         wv->blend_funcs_dirty = TRUE;   /* rebuild the app-blend object */
     }
+    return W3D_SUCCESS;
+}
+
+/* W3D_A_* (1..8) -> PIPE_FUNC_* for the alpha-test DSA */
+static uint32 w3d_alphafunc(uint32 mode)
+{
+    switch (mode) {
+    case W3D_A_NEVER:    return PIPE_FUNC_NEVER;
+    case W3D_A_LESS:     return PIPE_FUNC_LESS;
+    case W3D_A_GEQUAL:   return PIPE_FUNC_GEQUAL;
+    case W3D_A_LEQUAL:   return PIPE_FUNC_LEQUAL;
+    case W3D_A_GREATER:  return PIPE_FUNC_GREATER;
+    case W3D_A_NOTEQUAL: return PIPE_FUNC_NOTEQUAL;
+    case W3D_A_EQUAL:    return PIPE_FUNC_EQUAL;
+    case W3D_A_ALWAYS:   return PIPE_FUNC_ALWAYS;
+    default:             return PIPE_FUNC_ALWAYS;
+    }
+}
+
+uint32 w3d_SetAlphaMode(struct Warp3DIFace *Self, W3D_Context *ctx,
+                        uint32 mode, W3D_Float *refval)
+{
+    struct W3DVirgl *wv;
+    (void)Self;
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    wv->alpha_func = w3d_alphafunc(mode);
+    wv->alpha_ref  = refval ? (float)*refval : 0.0f;
+    DW3D("SetAlphaMode: mode=%lu ref*1000=%ld\n", (unsigned long)mode,
+         (long)(wv->alpha_ref * 1000.0f));
+    return W3D_SUCCESS;
+}
+
+uint32 w3d_SetColorMask(struct Warp3DIFace *Self, W3D_Context *ctx,
+                        uint32 r, uint32 g, uint32 b, uint32 a)
+{
+    struct W3DVirgl *wv;
+    uint32 mask;
+    (void)Self;
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    /* pipe colormask: bit0=R bit1=G bit2=B bit3=A */
+    mask = (r ? 1u : 0) | (g ? 2u : 0) | (b ? 4u : 0) | (a ? 8u : 0);
+    if (mask != wv->color_mask) {
+        wv->color_mask = mask;
+        wv->blend_mask_dirty  = TRUE;   /* rebuild BOTH blend objects */
+        wv->blend_funcs_dirty = TRUE;
+    }
+    DW3D("SetColorMask: mask=0x%lx\n", (unsigned long)mask);
+    return W3D_SUCCESS;
+}
+
+uint32 w3d_SetFrontFace(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 dir)
+{
+    struct W3DVirgl *wv;
+    (void)Self;
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    wv->front_ccw = (dir == W3D_CCW);   /* rasterizer rebuilds on next draw */
+    DW3D("SetFrontFace: %s\n", wv->front_ccw ? "CCW" : "CW");
+    return W3D_SUCCESS;
+}
+
+/* Per-texture filter/wrap recorders (FE slots 30/32; sampler object is
+ * rebuilt lazily inside the next draw's command buffer). */
+uint32 w3d_SetTexFilter(W3D_Context *ctx, W3D_Texture *tex,
+                        uint32 fmin, uint32 fmag)
+{
+    struct W3DTexInfo *ti;
+    (void)ctx;
+    if (!tex || !tex->driver) return W3D_SUCCESS;  /* pre-realize call: defaults */
+    ti = tex->driver;
+    if (ti->magic != W3DTEX_MAGIC) return W3D_SUCCESS;
+    if (ti->filter_min != fmin || ti->filter_mag != fmag) {
+        ti->filter_min = fmin; ti->filter_mag = fmag;
+        ti->sampler_dirty = 1;
+    }
+    DW3D("SetFilter: tex=%p min=%lu mag=%lu\n", (void *)tex,
+         (unsigned long)fmin, (unsigned long)fmag);
+    return W3D_SUCCESS;
+}
+
+uint32 w3d_SetTexWrap(W3D_Context *ctx, W3D_Texture *tex,
+                      uint32 mode_s, uint32 mode_t, W3D_Color *border)
+{
+    struct W3DTexInfo *ti;
+    (void)ctx;
+    if (!tex || !tex->driver) return W3D_SUCCESS;
+    ti = tex->driver;
+    if (ti->magic != W3DTEX_MAGIC) return W3D_SUCCESS;
+    if (ti->wrap_s != mode_s || ti->wrap_t != mode_t || border) {
+        ti->wrap_s = mode_s; ti->wrap_t = mode_t;
+        if (border) {
+            ti->border[0] = border->r; ti->border[1] = border->g;
+            ti->border[2] = border->b; ti->border[3] = border->a;
+        }
+        ti->sampler_dirty = 1;
+    }
+    DW3D("SetWrapMode: tex=%p s=%lu t=%lu\n", (void *)tex,
+         (unsigned long)mode_s, (unsigned long)mode_t);
     return W3D_SUCCESS;
 }
 
@@ -1088,8 +1326,17 @@ void w3d_FreeTexObj(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Texture *tex
     if (ctx && ctx->driver) {
         wv = ctx->driver;
         if (wv->cur_tex == tex) wv->cur_tex = NULL;
-        if (g_IV3D)
+        if (g_IV3D) {
+            if (ti->sampler) {   /* private filter/wrap sampler object */
+                uint32 dw[8]; struct VirglCmdBuf dcb;
+                virgl_cmd_init(&dcb, dw, 8);
+                virgl_cmd_destroy_object(&dcb, VIRGL_OBJECT_SAMPLER_STATE,
+                                         ti->sampler);
+                g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id,
+                               dcb.buf, dcb.dwords);
+            }
             g_IV3D->FreeTexture(g_IV3D, wv->info.token, ti->res, ti->view);
+        }
     }
     ti->magic = 0;
     tex->driver = NULL;
@@ -1229,11 +1476,11 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
         uint32 fs = (wv->texenv_mode == W3D_MODULATE) ? wv->info.fs_modulate_handle
                   : (wv->texenv_mode == W3D_DECAL)    ? wv->info.fs_decal_handle
                   :                                     wv->info.fs_blend_handle;
+        uint32 samp = tex_sampler(&cbuf, wv, ti);
         virgl_cmd_bind_object(&cbuf, VIRGL_OBJECT_VERTEX_ELEMENTS, wv->info.ve3_handle);
         virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_VERTEX, wv->info.vs3_handle);
         virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, fs);
-        virgl_cmd_bind_sampler_states(&cbuf, PIPE_SHADER_FRAGMENT, 0, 1,
-                                      &wv->info.sampler_linear);
+        virgl_cmd_bind_sampler_states(&cbuf, PIPE_SHADER_FRAGMENT, 0, 1, &samp);
         virgl_cmd_set_sampler_views(&cbuf, PIPE_SHADER_FRAGMENT, 0, 1, &ti->view);
         if (wv->texenv_mode == W3D_BLEND)
             virgl_cmd_set_constant_buffer(&cbuf, PIPE_SHADER_FRAGMENT, 0,
@@ -1249,9 +1496,9 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
         }
         virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_VERTEX, wv->info.vs_handle);
         if (ti) {
+            uint32 samp = tex_sampler(&cbuf, wv, ti);
             virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, wv->info.fs_tex_handle);
-            virgl_cmd_bind_sampler_states(&cbuf, PIPE_SHADER_FRAGMENT, 0, 1,
-                                          &wv->info.sampler_linear);
+            virgl_cmd_bind_sampler_states(&cbuf, PIPE_SHADER_FRAGMENT, 0, 1, &samp);
             virgl_cmd_set_sampler_views(&cbuf, PIPE_SHADER_FRAGMENT, 0, 1, &ti->view);
         } else {
             virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, wv->info.fs_handle);
@@ -1353,6 +1600,14 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
         wv->depth_test  = (fe & W3D_ZBUFFER)       != 0;
         wv->depth_write = (fe & W3D_ZBUFFERUPDATE) != 0;
         wv->blend_on    = (fe & W3D_BLENDING)      != 0;
+        wv->alpha_on    = (fe & W3D_ALPHATEST)     != 0;
+        wv->cull_on     = (fe & W3D_CULLFACE)      != 0;
+        /* W3D_SetFrontFace never reaches the backend -- the FE records it in
+         * the public ctx->FrontFaceOrder (V4 field), like texenv.  INVERTED
+         * into GL terms: our pipeline rasterizes with an effective y-flip
+         * (suite-proven: a screen-space-CCW quad is window-CW), so
+         * W3D_CCW-front == GL front_ccw 0. */
+        wv->front_ccw   = (ctx->FrontFaceOrder == W3D_CW);
         /* TexEnv is PER-TEXTURE in classic W3D: W3D_SetTexEnv dispatches to
          * backend slot 35 and the FE stores NOTHING in the public context --
          * ctx->globaltexenvmode only carries the context default (MODULATE on
@@ -1384,7 +1639,7 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
      * reported "Illegal command buffer" and poisoned the host context = the
      * June 2026 grey-window freeze.  REPLACE path = 8 floats/vert -> 1998
      * (=666*3), unchanged and historically proven. */
-    CHUNK = (wv->texenv_mode != W3D_REPLACE) ? 1350U : 1998U;
+    CHUNK = (wv->texenv_mode != W3D_REPLACE) ? 1338U : 1998U;
     /* Transition-only census: one line per texenv MODE CHANGE tells us which
      * path (WIDE combine vs narrow REPLACE) a real workload actually runs --
      * the June grey-window revert lacked exactly this visibility. */

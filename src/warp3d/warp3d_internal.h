@@ -50,6 +50,14 @@ struct W3DTexInfo {
      * draw falls back to the context global. */
     uint32 texenv_mode;      /* W3D_REPLACE/DECAL/MODULATE/BLEND or 0 */
     float  texenv_color[4];  /* env colour (W3D_BLEND) */
+    /* Per-texture filter/wrap (W3D_SetFilter slot 30 / W3D_SetWrapMode slot
+     * 32).  A private sampler object is (re)built lazily at the next draw;
+     * 0 = defaults -> the chip's shared linear sampler is used. */
+    uint32 filter_min, filter_mag;  /* W3D_NEAREST/W3D_LINEAR... or 0 */
+    uint32 wrap_s, wrap_t;          /* W3D_REPEAT/W3D_CLAMP_LAST... or 0 */
+    float  border[4];               /* border colour (wrap mode 3) */
+    uint32 sampler;                 /* live private sampler handle, 0 = none */
+    uint32 sampler_dirty;           /* filter/wrap changed -> rebuild */
 };
 
 struct W3DVirgl {
@@ -103,6 +111,30 @@ struct W3DVirgl {
     uint32 src_blend, dst_blend;    /* W3D_SetBlendMode funcs */
     BOOL   blend_on;                /* W3D_BLENDING enabled */
     BOOL   blend_funcs_dirty;       /* src/dst changed -> recreate blend obj */
+
+    /* ---- 8b batch 1 dynamic pipeline state.  virgl objects are immutable,
+     * so every state change FLIP-FLOPS between two handles: create the new
+     * one, bind it, destroy the old -- never create over a live handle and
+     * never destroy a bound one. ---- */
+    /* alpha test (W3D_SetAlphaMode; enabled by the W3D_ALPHATEST mirror bit) */
+    uint32 alpha_func;              /* PIPE_FUNC_*, 0 = never set */
+    float  alpha_ref;
+    BOOL   alpha_on;                /* fe mirror, per draw */
+    uint32 dsa_alpha_h;             /* live alpha-DSA handle (315/317), 0=none */
+    uint32 dsa_alpha_s0;            /* S0 the live object was built with */
+    float  dsa_alpha_ref;           /* ref the live object was built with */
+    /* colour mask (W3D_SetColorMask) -- baked into BOTH blend objects */
+    uint32 color_mask;              /* pipe RGBA bits, default 0xF */
+    BOOL   blend_mask_dirty;        /* mask changed -> recreate blend objects */
+    uint32 blend_opaque_h;          /* live no-blend object (310/313) */
+    uint32 blend_func_h;            /* live app-factors object (311/312) */
+    /* backface cull (W3D_CULLFACE mirror bit + W3D_SetFrontFace) */
+    BOOL   cull_on;                 /* fe mirror, per draw */
+    BOOL   front_ccw;               /* W3D_SetFrontFace (default CCW) */
+    uint32 rast_h;                  /* live rasterizer handle (316/318), 0=none */
+    uint32 rast_s0;                 /* S0 the live object was built with */
+    /* per-texture sampler handle allocator (filter/wrap; 340+) */
+    uint32 sampler_next;
 
     /* bound vertex arrays (W3D_VertexPointer / W3D_ColorPointer) */
     const UBYTE *vtx_ptr;  int vtx_stride;  uint32 vtx_mode;
@@ -159,6 +191,11 @@ void         w3d_UnLockHardware(struct Warp3DIFace *Self, W3D_Context *ctx);
 void         w3d_WaitIdle(struct Warp3DIFace *Self, W3D_Context *ctx);
 uint32       w3d_CheckIdle(struct Warp3DIFace *Self, W3D_Context *ctx);
 uint32       w3d_SetBlendMode(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 s, uint32 d);
+uint32       w3d_SetAlphaMode(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 mode, W3D_Float *refval);
+uint32       w3d_SetColorMask(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 r, uint32 g, uint32 b, uint32 a);
+uint32       w3d_SetFrontFace(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 dir);
+uint32       w3d_SetTexFilter(W3D_Context *ctx, W3D_Texture *tex, uint32 fmin, uint32 fmag);
+uint32       w3d_SetTexWrap(W3D_Context *ctx, W3D_Texture *tex, uint32 mode_s, uint32 mode_t, W3D_Color *border);
 uint32       w3d_SetDrawRegion(struct Warp3DIFace *Self, W3D_Context *ctx, struct BitMap *bm, int yoff, W3D_Scissor *sc);
 uint32       w3d_DrawTriangle(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Triangle *tri);
 uint32       w3d_DrawTriangleV(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_TriangleV *t);

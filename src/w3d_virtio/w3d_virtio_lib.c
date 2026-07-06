@@ -421,11 +421,28 @@ static uint32 hw_TexRealize(APTR Self, W3D_Context *ctx, W3D_Texture *tex,
     if (!get_wv(ctx)) return (uint32)W3D_ILLEGALINPUT;
     return w3d_RealizeTexture((struct Warp3DIFace *)0, ctx, tex);
 }
-static uint32 hw_TexAccept(APTR Self, W3D_Context *ctx, W3D_Texture *tex,
-                           uint32 a, uint32 b, uint32 c)
+/* slot 30 (off 0xb4) = filter dispatch: the AllocTexObj filter sub-call AND
+ * W3D_SetFilter(ctx, tex, min, mag) both land here.  Recorded per-texture;
+ * the private sampler is rebuilt inside the next draw's cbuf. */
+static uint32 hw_TexFilter(APTR Self, W3D_Context *ctx, W3D_Texture *tex,
+                           uint32 fmin, uint32 fmag)
 {
-    (void)Self; (void)ctx; (void)tex; (void)a; (void)b; (void)c;
-    return 0;   /* W3D_SUCCESS -- filter/wrap defaults are fine */
+    (void)Self;
+    DBP("slot30 SetFilter tex=%08lx min=%lu mag=%lu\n",
+        (unsigned long)(APTR)tex, (unsigned long)fmin, (unsigned long)fmag);
+    return w3d_SetTexFilter(ctx, tex, fmin, fmag);
+}
+
+/* slot 32 (off 0xcc) = wrap dispatch: AllocTexObj wrap sub-call AND
+ * W3D_SetWrapMode(ctx, tex, mode_s, mode_t, bordercolor). */
+static uint32 hw_TexWrap(APTR Self, W3D_Context *ctx, W3D_Texture *tex,
+                         uint32 mode_s, uint32 mode_t, W3D_Color *border)
+{
+    (void)Self;
+    DBP("slot32 SetWrapMode tex=%08lx s=%lu t=%lu border=%08lx\n",
+        (unsigned long)(APTR)tex, (unsigned long)mode_s, (unsigned long)mode_t,
+        (unsigned long)(APTR)border);
+    return w3d_SetTexWrap(ctx, tex, mode_s, mode_t, border);
 }
 
 /* slot 35 (off 0xc8) = the FE's texenv dispatch: both the AllocTexObj env
@@ -491,6 +508,25 @@ static uint32 hw_FreeTexObj(APTR S, W3D_Context *ctx, W3D_Texture *tex)
       (unsigned long)(APTR)ctx, (unsigned long)(APTR)tex);
   if (!ctx_ok(ctx)) return 0;
   w3d_FreeTexObj((struct Warp3DIFace *)0, ctx, tex); return 0; }         /* idx 20 */
+/* slot 28 = W3D_SetAlphaMode(ctx, mode, W3D_Float *refval) -- confirmed by
+ * suite telemetry: slot 28 (ctx, 5=W3D_A_GREATER, &ref). */
+static uint32 hw_SetAlphaMode(APTR S, W3D_Context *ctx, uint32 mode, W3D_Float *ref)
+{ (void)S;
+  DBP("slot28 SetAlphaMode mode=%lu ref=%08lx\n",
+      (unsigned long)mode, (unsigned long)(APTR)ref);
+  if (!get_wv(ctx)) return 0;
+  return w3d_SetAlphaMode((struct Warp3DIFace *)0, ctx, mode, ref); }
+
+/* slot 33 = W3D_SetColorMask(ctx, r, g, b, a) -- confirmed by telemetry:
+ * slot 33 (ctx, 0/1, 1, 1) with alpha as the 5th arg. */
+static uint32 hw_SetColorMask(APTR S, W3D_Context *ctx, uint32 r, uint32 g,
+                              uint32 b, uint32 a)
+{ (void)S;
+  DBP("slot33 SetColorMask %lu%lu%lu%lu\n", (unsigned long)r,
+      (unsigned long)g, (unsigned long)b, (unsigned long)a);
+  if (!get_wv(ctx)) return 0;
+  return w3d_SetColorMask((struct Warp3DIFace *)0, ctx, r, g, b, a); }
+
 static uint32 hw_LockHW(APTR S, W3D_Context *ctx)     { (void)S; (void)ctx; return 0; } /* 44 */
 static uint32 hw_UnLockHW(APTR S, W3D_Context *ctx)   { (void)S; (void)ctx; return 0; } /* 45 */
 static uint32 hw_SetDrawRegion(APTR S, W3D_Context *ctx){ (void)S; (void)ctx; return 0; } /* 58 */
@@ -519,11 +555,14 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)hw_SetStateFn,    /* 23 SetState (base 60, off 152) + ctx+0xd0 poke */
     (APTR)hw_DestroyContext,/* 24 DestroyContext */
     (APTR)hw_s25,           /* 25 (SetBlendMode is idx 29 at base 60) */
-    (APTR)hw_s26, (APTR)hw_s27, (APTR)hw_s28, (APTR)w3d_SetBlendMode, /* 29 SetBlendMode (base 60) */
-    (APTR)hw_TexAccept, /* 30 tex filter (AllocTexObj sub-call, off 0xb4) */
+    (APTR)hw_s26, (APTR)hw_s27,
+    (APTR)hw_SetAlphaMode,  /* 28 SetAlphaMode (suite telemetry) */
+    (APTR)w3d_SetBlendMode, /* 29 SetBlendMode (base 60) */
+    (APTR)hw_TexFilter, /* 30 tex filter (AllocTexObj sub-call + SetFilter) */
     (APTR)hw_s31,
-    (APTR)hw_TexAccept, /* 32 tex wrap (off 0xcc) */
-    (APTR)hw_s33, (APTR)hw_s34,
+    (APTR)hw_TexWrap,   /* 32 tex wrap (off 0xcc; + SetWrapMode) */
+    (APTR)hw_SetColorMask,  /* 33 SetColorMask (suite telemetry) */
+    (APTR)hw_s34,
     (APTR)hw_TexEnv, /* 35 tex env / SetTexEnv (off 0xc8) -- records per-tex mode */
     (APTR)hw_s36, /* 36 (was DrawTriStrip: mis-mapped) */
     (APTR)hw_SetZCompare, /* 37 SetZCompareMode (base 60, off 208) */

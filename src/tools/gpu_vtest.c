@@ -7,6 +7,8 @@
 */
 
 #include <proto/exec.h>
+#include <proto/graphics.h>
+#include <graphics/gfx.h>
 #include <libraries/gpu.h>
 #include <interfaces/gpu.h>
 #include <gpulib/virtio_gpu_backend.h>
@@ -170,6 +172,78 @@ int main(void)
                            "fence=%ld\n", (long)ft, (long)ff);
                     if (ft <= 0 || ff <= 0)
                         rc = 10;
+
+                    /* Phase 5b: composite mechanic through the public API
+                       -- import a P96 bitmap, feed its locked base/stride
+                       to the backend's texture upload, free. This is the
+                       exact bitmap->GPU-texture path the composite Tier 1
+                       hook uses. */
+                    {
+                        struct BitMap *bm = IGraphics->AllocBitMapTags(
+                            32, 32, 32,
+                            BMATags_PixelFormat, PIXF_A8R8G8B8,
+                            BMATags_Clear,       TRUE,
+                            TAG_DONE);
+                        if (bm != NULL)
+                        {
+                            uint32 bpr = 0, iw = 0, ih = 0;
+                            struct GpuBuffer *ib = IGpu->GPU_ImportBitMapA(
+                                bm, GPU_TAGS(
+                                { GPUTAG_OutBytesPerRow, (uint32)&bpr },
+                                { GPUTAG_OutWidth,       (uint32)&iw },
+                                { GPUTAG_OutHeight,      (uint32)&ih }));
+                            if (ib != NULL)
+                            {
+                                uint32 *px = (uint32 *)
+                                    IGpu->GPU_MapBuffer(ib);
+                                uint32 view = 0, res = 0;
+                                struct VgbV3DCall vc;
+                                int32 fr2;
+                                uint32 yy, xx;
+
+                                for (yy = 0; yy < ih; yy++)
+                                    for (xx = 0; xx < iw; xx++)
+                                        px[yy * (bpr / 4) + xx] =
+                                            0xFF000000 | (xx * 8 << 16) |
+                                            (yy * 8);
+
+                                vc.a[0] = 0;
+                                vc.a[1] = iw; vc.a[2] = ih;
+                                vc.a[3] = (uint32)px; vc.a[4] = bpr;
+                                vc.a[5] = (uint32)&view;
+                                vc.a[6] = (uint32)&res;
+                                vc.hdr.op  = VGB_OP_V3DCALL;
+                                vc.hdr.arg = VGB_V3D_CREATE_TEX;
+                                fr2 = IGpu->GPU_SubmitA(GPU_QUEUE_RENDER,
+                                        &vc, sizeof(vc),
+                                        GPU_TAGS({ GPUTAG_Backend,
+                                                   (uint32)vid }));
+                                printf("gpu_vtest: import->texture "
+                                       "fence=%ld view=%lu res=%lu\n",
+                                       (long)fr2, (unsigned long)view,
+                                       (unsigned long)res);
+                                if (fr2 <= 0 || view == 0 || res == 0)
+                                    rc = 10;
+                                else
+                                {
+                                    vc.hdr.arg = VGB_V3D_FREE_TEX;
+                                    vc.a[1] = res; vc.a[2] = view;
+                                    IGpu->GPU_SubmitA(GPU_QUEUE_RENDER,
+                                        &vc, sizeof(vc),
+                                        GPU_TAGS({ GPUTAG_Backend,
+                                                   (uint32)vid }));
+                                }
+                                IGpu->GPU_DestroyBuffer(ib);
+                            }
+                            else
+                            {
+                                printf("gpu_vtest: ImportBitMapA "
+                                       "failed\n");
+                                rc = 10;
+                            }
+                            IGraphics->FreeBitMap(bm);
+                        }
+                    }
                 }
                 else
                 {

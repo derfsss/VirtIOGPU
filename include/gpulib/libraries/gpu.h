@@ -119,6 +119,21 @@ struct GpuFenceMsg
 #define GPUTAG_NotifySignal    (GPU_TAGBASE + 38)  /* uint32 signal mask   */
 #define GPUTAG_NotifyPort      (GPU_TAGBASE + 39)  /* struct MsgPort *     */
 
+/* GPU_ImportBitMapA (appended post-v0-freeze, Phase 5): wraps a P96
+** BitMap as a GpuBuffer via graphics v54 LockBitMapTagList. The bitmap
+** STAYS LOCKED until GPU_DestroyBuffer (which unlocks it) — keep imports
+** SHORT-LIVED: import → use → destroy. Imported buffers have
+** BackendId == GPU_BUFFER_IMPORTED and are core-handled: Map/Unmap/
+** Destroy are valid; Present/queue ops are not (it is a CPU-side view;
+** feed the base/stride to backend ops instead, e.g. texture upload).
+** Output tags (each ti_Data = POINTER to receiving storage):           */
+#define GPU_BUFFER_IMPORTED    (-1)
+#define GPUTAG_OutBytesPerRow  (GPU_TAGBASE + 40)  /* uint32 *           */
+#define GPUTAG_OutPixelFormat  (GPU_TAGBASE + 41)  /* uint32 * (RGBFTYPE)*/
+#define GPUTAG_OutWidth        (GPU_TAGBASE + 42)  /* uint32 *           */
+#define GPUTAG_OutHeight       (GPU_TAGBASE + 43)  /* uint32 *           */
+#define GPUTAG_OutOnBoard      (GPU_TAGBASE + 44)  /* uint32 * (BOOL)    */
+
 /* GPU_RegisterBackendA tags.
 ** GPUTAG_AsyncFences (BOOL, default FALSE): the backend's fences do NOT
 ** retire at issue; the backend reports retirement from task context via

@@ -61,6 +61,13 @@ void chip_apply_perf_env(struct ChipGPUState *gs, struct BoardInfo *bi)
           gs->virgl2d_enabled ? "ON" : "off",
           (ULONG)gs->gpuaccel_min_area);
 
+    /* Phase 8a: composite hook + DIPF_IS_HWCOMPOSITE advertisement are no
+     * longer virgl-gated -- the CPU Porter-Duff path serves off-board
+     * destinations (which stock graphics refuses) and the plain
+     * virtio-gpu-pci profile. HW composite still requires virgl below. */
+    if (chip_comp_install_hook(gs))
+        chip_comp_set_dipf_flags(gs);
+
     /* Virgl 2D / HW-composite bring-up.  Deferred here (not InitCard) so it
      * can be ENV-gated.  Brings up the 3D scanout context + pipeline, then
      * installs the CompositeTagList hook and advertises DIPF_IS_HWCOMPOSITE

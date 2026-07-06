@@ -207,8 +207,10 @@ static BOOL chip_SetSwitch(struct BoardInfo *bi, BOOL enabled)
     }
 
     /* Set DIPF_IS_HWCOMPOSITE on our display modes (once, deferred to here
-     * because display database isn't ready during chip_InitCard_C) */
-    if (enabled && gs && gs->virgl_2d_ready) {
+     * because display database isn't ready during chip_InitCard_C).
+     * Phase 8a: no longer virgl-gated -- the CPU compositor serves all
+     * profiles. */
+    if (enabled && gs) {
         chip_comp_set_dipf_flags(gs);
     }
 

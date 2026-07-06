@@ -797,10 +797,167 @@ BOOL chip_comp_test_textured_quad(struct ChipGPUState *gs)
 /* Global pointer to the original CompositeTagList method */
 static APTR g_orig_CompositeTagList = NULL;
 
-/* HW vs SW composite call counters for diagnostics */
-static uint32 g_comp_hw_count = 0;
-static uint32 g_comp_sw_count = 0;
-static uint32 g_comp_total    = 0;
+/* HW vs SW vs CPU composite call counters for diagnostics */
+static uint32 g_comp_hw_count  = 0;
+static uint32 g_comp_sw_count  = 0;
+static uint32 g_comp_cpu_count = 0;
+static uint32 g_comp_total     = 0;
+
+/* =======================================================================
+ * CPU Porter-Duff compositor (Phase 8a).
+ *
+ * Engages where neither the GPU path nor stock graphics.library can:
+ * off-board (RAM) destinations -- observed to make stock CompositeTagList
+ * fail, which is why GfxBench2D reported "compositing not supported" --
+ * and ALL destinations when virgl is off (plain virtio-gpu-pci profile).
+ *
+ * 32bpp ARGB source/dest (or COMPSRC_SOLIDCOLOR), rect->rect nearest
+ * scaling, per-pixel alphas + SrcAlpha/DestAlpha overrides/modulation,
+ * operators 0-14. Factor semantics mirror comp_blend_factors[] above so
+ * CPU and GPU render identically. Runs at TCG-JIT (host CPU) speed --
+ * the 'pat' precedent, but complete and driver-integrated.
+ * ======================================================================= */
+
+#define CF_ZERO 0
+#define CF_ONE  1
+#define CF_SA   2
+#define CF_ISA  3
+#define CF_DA   4
+#define CF_IDA  5
+
+/* rgb_src, rgb_dst, a_src, a_dst -- rows match COMPOSITE_* 0..12 */
+static const uint8 comp_cpu_factors[13][4] = {
+    { CF_ZERO, CF_ZERO, CF_ZERO, CF_ZERO },   /* 0  Clear       */
+    { CF_ONE,  CF_ZERO, CF_ONE,  CF_ZERO },   /* 1  Src         */
+    { CF_ZERO, CF_ONE,  CF_ZERO, CF_ONE  },   /* 2  Dest        */
+    { CF_SA,   CF_ISA,  CF_ONE,  CF_ISA  },   /* 3  SrcOverDest */
+    { CF_IDA,  CF_ONE,  CF_IDA,  CF_ONE  },   /* 4  DestOverSrc */
+    { CF_DA,   CF_ZERO, CF_DA,   CF_ZERO },   /* 5  SrcInDest   */
+    { CF_ZERO, CF_SA,   CF_ZERO, CF_SA   },   /* 6  DestInSrc   */
+    { CF_IDA,  CF_ZERO, CF_IDA,  CF_ZERO },   /* 7  SrcOutDest  */
+    { CF_ZERO, CF_ISA,  CF_ZERO, CF_ISA  },   /* 8  DestOutSrc  */
+    { CF_DA,   CF_ISA,  CF_ZERO, CF_ONE  },   /* 9  SrcAtopDest */
+    { CF_IDA,  CF_SA,   CF_ONE,  CF_ZERO },   /* 10 DestAtopSrc */
+    { CF_IDA,  CF_ISA,  CF_IDA,  CF_ISA  },   /* 11 SrcXorDest  */
+    { CF_ONE,  CF_ONE,  CF_ONE,  CF_ONE  },   /* 12 Plus        */
+};
+
+static inline uint32 comp_mul8(uint32 c, uint32 f)
+{
+    uint32 t = c * f + 128;
+    return (t + (t >> 8)) >> 8;
+}
+
+static inline uint32 comp_factor(uint32 sel, uint32 sa, uint32 da)
+{
+    switch (sel) {
+        case CF_ONE: return 255;
+        case CF_SA:  return sa;
+        case CF_ISA: return 255 - sa;
+        case CF_DA:  return da;
+        case CF_IDA: return 255 - da;
+        default:     return 0;
+    }
+}
+
+static uint32 chip_comp_cpu(uint32 Operator,
+                            BOOL is_solid, const uint8 *src_base,
+                            uint32 src_bpr,
+                            int32 src_x, int32 src_y,
+                            int32 src_w, int32 src_h,
+                            uint8 *dst_base, uint32 dst_bpr,
+                            int32 dst_bm_w, int32 dst_bm_h,
+                            int32 dst_x, int32 dst_y,
+                            int32 dst_w, int32 dst_h,
+                            uint32 flags, uint32 color0,
+                            BOOL haveSrcA, uint32 srcA8,
+                            BOOL haveDstA, uint32 dstA8)
+{
+    int32 ox, oy;
+
+    if (dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0)
+        return COMPERR_Value;
+    if (Operator >= COMPOSITE_NumOperators)
+        return COMPERR_UnknownOperator;
+
+    for (oy = 0; oy < dst_h; oy++)
+    {
+        int32 ty = dst_y + oy;
+        int32 sy = src_y + (oy * src_h) / dst_h;
+        uint32 *drow;
+        const uint32 *srow = NULL;
+
+        if (ty < 0 || ty >= dst_bm_h)
+            continue;
+        drow = (uint32 *)(dst_base + (uint32)ty * dst_bpr);
+        if (!is_solid)
+            srow = (const uint32 *)(src_base + (uint32)sy * src_bpr);
+
+        for (ox = 0; ox < dst_w; ox++)
+        {
+            int32 tx = dst_x + ox;
+            uint32 s, d, sa, da, out;
+
+            if (tx < 0 || tx >= dst_bm_w)
+                continue;
+
+            s = is_solid ? color0
+                         : srow[src_x + (ox * src_w) / dst_w];
+            d = drow[tx];
+
+            sa = s >> 24;
+            if (haveSrcA)
+                sa = (flags & COMPFLAG_SrcAlphaOverride)
+                         ? srcA8 : comp_mul8(sa, srcA8);
+            da = (flags & COMPFLAG_IgnoreDestAlpha) ? 255 : (d >> 24);
+            if (haveDstA)
+                da = (flags & COMPFLAG_DestAlphaOverride)
+                         ? dstA8 : comp_mul8(da, dstA8);
+
+            if (Operator == COMPOSITE_Maximum ||
+                Operator == COMPOSITE_Minimum)
+            {
+                uint32 r = 0;
+                int sh;
+                for (sh = 0; sh < 32; sh += 8)
+                {
+                    uint32 sc = (s >> sh) & 0xFF;
+                    uint32 dc = (d >> sh) & 0xFF;
+                    uint32 c = (Operator == COMPOSITE_Maximum)
+                                   ? (sc > dc ? sc : dc)
+                                   : (sc < dc ? sc : dc);
+                    r |= c << sh;
+                }
+                out = r;
+            }
+            else
+            {
+                const uint8 *fr = comp_cpu_factors[Operator];
+                uint32 fsc = comp_factor(fr[0], sa, da);
+                uint32 fdc = comp_factor(fr[1], sa, da);
+                uint32 fsa = comp_factor(fr[2], sa, da);
+                uint32 fda = comp_factor(fr[3], sa, da);
+                uint32 r = 0;
+                int sh;
+                for (sh = 0; sh < 24; sh += 8)
+                {
+                    uint32 c = comp_mul8((s >> sh) & 0xFF, fsc) +
+                               comp_mul8((d >> sh) & 0xFF, fdc);
+                    if (c > 255) c = 255;
+                    r |= c << sh;
+                }
+                {
+                    uint32 a = comp_mul8(sa, fsa) + comp_mul8(da, fda);
+                    if (a > 255) a = 255;
+                    r |= a << 24;
+                }
+                out = r;
+            }
+            drow[tx] = out;
+        }
+    }
+    return COMPERR_Success;
+}
 
 static uint32 hook_CompositeTagList(struct Interface *Self,
                                       uint32 Operator,
@@ -824,25 +981,19 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
         static uint32 comp_last_log = 0;
         if (g_comp_total - comp_last_log >= 256) {
             comp_last_log = g_comp_total;
-            DCHIP("composite census: total=%lu hw=%lu sw=%lu",
+            DCHIP("composite census: total=%lu hw=%lu cpu=%lu sw=%lu",
                   (ULONG)g_comp_total, (ULONG)g_comp_hw_count,
-                  (ULONG)g_comp_sw_count);
+                  (ULONG)g_comp_cpu_count, (ULONG)g_comp_sw_count);
         }
     }
 
-    if (!gs || !gs->virgl_2d_ready || !Destination) {
+    if (!gs || !Destination) {
         static volatile UBYTE warn_no_gs        = 0;
-        static volatile UBYTE warn_no_virgl     = 0;
         static volatile UBYTE warn_no_dest      = 0;
         if (!gs && !warn_no_gs) {
             warn_no_gs = 1;
             DCHIP("CompositeTagList hook: g_chip_state NULL -- "
                   "every call falling back to SW (logged once)");
-        } else if (gs && !gs->virgl_2d_ready && !warn_no_virgl) {
-            warn_no_virgl = 1;
-            DCHIP("CompositeTagList hook: virgl_2d_ready=FALSE -- "
-                  "every call falling back to SW (logged once; "
-                  "Virgl negotiation off => no HW composite)");
         } else if (!Destination && !warn_no_dest) {
             warn_no_dest = 1;
             DCHIP("CompositeTagList hook: Destination NULL -- "
@@ -854,7 +1005,10 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
         return orig(Self, Operator, Source, Destination, tags);
     }
 
-    /* Check if destination bitmap lives in our board memory */
+    /* Destination residency decides the route (Phase 8a): board_mem dests
+     * may use the GPU path (virgl up) or stock SW (proven correct there);
+     * OFF-board (RAM) dests make stock CompositeTagList FAIL -- those go
+     * to our CPU compositor, as does everything when virgl is off. */
     APTR dst_planes0 = Destination->Planes[0];
     BOOL is_ours = (dst_planes0 >= gs->board_mem &&
                     dst_planes0 < (APTR)((uint8 *)gs->board_mem + gs->board_mem_size));
@@ -863,14 +1017,10 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
         if (!warn_not_ours) {
             warn_not_ours = 1;
             DCHIP("CompositeTagList hook: dst Planes[0]=%p outside board_mem "
-                  "[%p..%p] -- SW fallback (logged once)",
+                  "[%p..%p] -- routing to CPU compositor (logged once)",
                   dst_planes0, gs->board_mem,
                   (APTR)((UBYTE *)gs->board_mem + gs->board_mem_size));
         }
-        g_comp_sw_count++;
-        g_comp_total++;
-        OrigFunc orig = (OrigFunc)g_orig_CompositeTagList;
-        return orig(Self, Operator, Source, Destination, tags);
     }
 
     /* Parse COMPTAG_* tags */
@@ -880,6 +1030,8 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
     uint32 color0 = 0xFF000000;
     BOOL has_vertex_array = FALSE;
     BOOL has_alpha_mask = FALSE;
+    BOOL haveSrcA = FALSE, haveDstA = FALSE;
+    uint32 srcA8 = 255, dstA8 = 255;   /* 16.16 fixpoint -> 8-bit */
 
     if (tags) {
         struct TagItem *tag;
@@ -901,6 +1053,17 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
             case COMPTAG_Color0:       color0 = (uint32)tag->ti_Data; break;
             case COMPTAG_VertexArray:  has_vertex_array = TRUE; break;
             case COMPTAG_SrcAlphaMask: has_alpha_mask = TRUE; break;
+            case COMPTAG_DestAlphaMask: has_alpha_mask = TRUE; break;
+            case COMPTAG_SrcAlpha:
+                haveSrcA = TRUE;
+                srcA8 = ((uint32)tag->ti_Data * 255u) >> 16;
+                if (srcA8 > 255) srcA8 = 255;
+                break;
+            case COMPTAG_DestAlpha:
+                haveDstA = TRUE;
+                dstA8 = ((uint32)tag->ti_Data * 255u) >> 16;
+                if (dstA8 > 255) dstA8 = 255;
+                break;
             default: {
                 /* Unknown COMPTAG_*: log once per distinct tag value so
                  * we know if AOS4 ever hands us something we don't handle.
@@ -951,18 +1114,6 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
         goto sw_fallback;
     }
 
-    /* With double-buffering, skip HW composite entirely:
-     * - The Virgl surface is bound to a fixed resource at creation time.
-     *   After buffer swaps, it may target the displayed front buffer.
-     * - flush_all overwrites GPU content with board_mem every 5ms anyway,
-     *   so the HW result would only be visible for one frame at most.
-     * SW composite updates board_mem; flush_all presents it next cycle. */
-    if (gs->double_buffer) {
-        g_comp_sw_count++;
-        g_comp_total++;
-        goto sw_fallback;
-    }
-
     /* Determine source type and pixel data */
     BOOL is_solid = (Source == COMPSRC_SOLIDCOLOR);
     const void *src_data = NULL;
@@ -986,6 +1137,22 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
         }
     }
 
+    /* Phase 8a routing: OFF-board destinations (stock SW fails those --
+     * the GfxBench "not supported" finding) and virgl-off runs (plain
+     * virtio-gpu-pci) go to our CPU compositor. On-board + virgl
+     * continues into the proven HW/SW split below. */
+    if (!is_ours || !gs->virgl_2d_ready)
+        goto cpu_try;
+
+    /* With double-buffering, skip HW composite entirely:
+     * - The Virgl surface is bound to a fixed resource at creation time.
+     *   After buffer swaps, it may target the displayed front buffer.
+     * - flush_all overwrites GPU content with board_mem every 5ms anyway,
+     *   so the HW result would only be visible for one frame at most.
+     * SW composite updates board_mem; flush_all presents it next cycle. */
+    if (gs->double_buffer)
+        goto cpu_try;
+
     /* HYBRID (v53.174): the GPU path only renders PLAIN OPAQUE composites
      * correctly so far -- COMPFLAG_IgnoreDestAlpha set (opaque destination)
      * with NO source/dest alpha override.  Everything else renders wrong:
@@ -1001,11 +1168,9 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
     {
         BOOL opaque_simple = (flags & COMPFLAG_IgnoreDestAlpha) &&
             !(flags & (COMPFLAG_SrcAlphaOverride | COMPFLAG_DestAlphaOverride));
-        if (!opaque_simple) {
-            g_comp_sw_count++;
-            g_comp_total++;
-            goto sw_fallback;
-        }
+        if (!opaque_simple)
+            goto cpu_try;   /* CPU handles the alpha cases the GPU path
+                               and stock-SW-on-screen can't */
     }
 
     /* Attempt hardware compositing under io_lock to prevent interleaving
@@ -1042,12 +1207,10 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
                                           flags, color0);
         }
 
-        /* Fall back to software if HW can't handle it */
-        if (result == COMPERR_SoftwareFallback || result != COMPERR_Success) {
-            g_comp_sw_count++;
-            g_comp_total++;
-            goto sw_fallback;
-        }
+        /* Fall back to the CPU compositor if HW can't handle it (it will
+         * fall through to stock SW as a final resort). */
+        if (result == COMPERR_SoftwareFallback || result != COMPERR_Success)
+            goto cpu_try;
 
         /* Screen destination: the GPU wrote the scanout, but board_mem (the
          * RAM shadow the flush task transfers) is still stale -- run the SW
@@ -1063,6 +1226,45 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
         g_comp_total++;
 
         return result;
+    }
+
+cpu_try:
+    /* CPU Porter-Duff (Phase 8a): dest must be 32bpp and CPU-addressable
+     * (both RAM and board_mem are). Anything it can't take falls through
+     * to stock graphics.library as before. */
+    {
+        uint32 dst_format = gs->IGraphics
+            ? (uint32)gs->IGraphics->GetBitMapAttr(Destination,
+                                                   BMA_PIXELFORMAT)
+            : 0;
+        if (chip_format_bpp(dst_format) == 4 &&
+            !has_vertex_array && !has_alpha_mask &&
+            Destination->Planes[0] != NULL &&
+            (is_solid || src_data != NULL))   /* AmiDock passes sources
+                                                 with NULL Planes[0] --
+                                                 those go to stock SW */
+        {
+            int32 dst_bm_w = (int32)gs->IGraphics->GetBitMapAttr(
+                                 Destination, BMA_WIDTH);
+            int32 dst_bm_h = (int32)gs->IGraphics->GetBitMapAttr(
+                                 Destination, BMA_HEIGHT);
+            uint32 r = chip_comp_cpu(Operator, is_solid,
+                         (const uint8 *)src_data, src_bpr,
+                         src_x, src_y, src_w, src_h,
+                         (uint8 *)Destination->Planes[0],
+                         Destination->BytesPerRow,
+                         dst_bm_w, dst_bm_h,
+                         dst_x, dst_y, dst_w, dst_h,
+                         flags, color0,
+                         haveSrcA, srcA8, haveDstA, dstA8);
+            if (r == COMPERR_Success) {
+                g_comp_cpu_count++;
+                g_comp_total++;
+                return COMPERR_Success;
+            }
+        }
+        g_comp_sw_count++;
+        g_comp_total++;
     }
 
 sw_fallback:
@@ -1085,6 +1287,13 @@ sw_fallback:
 BOOL chip_comp_install_hook(struct ChipGPUState *gs)
 {
     struct ExecIFace *IExec = gs->IExec;
+
+    /* Idempotent: a second install would capture our own hook as "orig"
+       and recurse forever. */
+    static BOOL installed = FALSE;
+    if (installed)
+        return TRUE;
+    installed = TRUE;
 
     struct Library *gfxLib = IExec->OpenLibrary("graphics.library", 54);
     if (!gfxLib) {

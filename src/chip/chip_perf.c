@@ -50,42 +50,51 @@ void chip_apply_perf_env(struct ChipGPUState *gs, struct BoardInfo *bi)
                               buf, sizeof(buf), 0) >= 0);
     gs->virgl2d_enabled  = (gs->IDOS->GetVar("virtiogpu_virgl2d",
                               buf, sizeof(buf), 0) >= 0);
+    gs->composite_enabled = (gs->IDOS->GetVar("virtiogpu_composite",
+                              buf, sizeof(buf), 0) >= 0);
 
     if (gs->gpuaccel_min_area == 0)
         gs->gpuaccel_min_area = 64 * 64;   /* default large-rect threshold */
 
-    DCHIP("perf-env: zerocopy=%s dirtyrect=%s gpuaccel=%s virgl2d=%s (min_area=%lu)",
+    DCHIP("perf-env: zerocopy=%s dirtyrect=%s gpuaccel=%s virgl2d=%s composite=%s (min_area=%lu)",
           gs->zc_enabled ? "ON" : "off",
           gs->dirty_enabled ? "ON" : "off",
           gs->gpuaccel_enabled ? "ON" : "off",
           gs->virgl2d_enabled ? "ON" : "off",
+          gs->composite_enabled ? "ON" : "off",
           (ULONG)gs->gpuaccel_min_area);
 
-    /* Phase 8a: composite hook + DIPF_IS_HWCOMPOSITE advertisement are no
-     * longer virgl-gated -- the CPU Porter-Duff path serves off-board
-     * destinations (which stock graphics refuses) and the plain
-     * virtio-gpu-pci profile. HW composite still requires virgl below. */
-    if (chip_comp_install_hook(gs))
-        chip_comp_set_dipf_flags(gs);
-
-    /* Virgl 2D / HW-composite bring-up.  Deferred here (not InitCard) so it
-     * can be ENV-gated.  Brings up the 3D scanout context + pipeline, then
-     * installs the CompositeTagList hook and advertises DIPF_IS_HWCOMPOSITE
-     * so AOS4 routes window compositing through us.  Requires the host to
-     * have negotiated VIRGL (gl=on).  Default off -> none of this runs and
-     * the driver behaves exactly as before. */
+    /* Virgl 2D bring-up.  Deferred here (not InitCard) so it can be
+     * ENV-gated.  Brings up the 3D scanout context + pipeline used by
+     * Warp3D/MiniGL (the cow) AND the HW composite path.  Requires the
+     * host to have negotiated VIRGL (gl=on). */
     if (gs->virgl2d_enabled && gs->has_virgl && !gs->virgl_2d_ready) {
-        DCHIP("perf-env: virgl2d -- bringing up Virgl 2D + composite hook");
-        if (chip_virgl_init_2d(gs)) {
-            chip_comp_install_hook(gs);
-            chip_comp_set_dipf_flags(gs);
-            DCHIP("perf-env: Virgl 2D ACTIVE (res=%lu) + composite hook installed",
+        DCHIP("perf-env: virgl2d -- bringing up Virgl 2D pipeline");
+        if (chip_virgl_init_2d(gs))
+            DCHIP("perf-env: Virgl 2D ACTIVE (res=%lu)",
                   (ULONG)gs->virgl_2d_resource);
-        } else {
+        else
             DCHIP("perf-env: Virgl 2D init FAILED -- staying on convert path");
-        }
     } else if (gs->virgl2d_enabled && !gs->has_virgl) {
         DCHIP("perf-env: virgl2d requested but VIRGL not negotiated (gl=off) -- ignored");
+    }
+
+    /* Compositing (ENV:virtiogpu_composite, DEFAULT OFF).  Installs the
+     * CompositeTagList hook and advertises DIPF_IS_HWCOMPOSITE.  Gated OFF
+     * by default: the CPU Porter-Duff fallback is correct but slow under
+     * QEMU TCG (full-screen blends), so the desktop runs stock-composited
+     * unless explicitly enabled.  With virgl up, opaque composites still
+     * use the GPU; the CPU path covers the rest.  Turn on for real
+     * hardware or to test compositing:  setenv SAVE virtiogpu_composite 1 */
+    if (gs->composite_enabled) {
+        if (chip_comp_install_hook(gs)) {
+            chip_comp_set_dipf_flags(gs);
+            DCHIP("perf-env: composite ON -- hook installed + "
+                  "DIPF_IS_HWCOMPOSITE advertised");
+        }
+    } else {
+        DCHIP("perf-env: composite OFF (default) -- stock compositing; "
+              "'setenv SAVE virtiogpu_composite 1' to enable");
     }
 
     /* Phase 6 "first triangle" milestone (ENV:virtiogpu_tritest): draw an RGB

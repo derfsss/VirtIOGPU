@@ -208,9 +208,10 @@ static BOOL chip_SetSwitch(struct BoardInfo *bi, BOOL enabled)
 
     /* Set DIPF_IS_HWCOMPOSITE on our display modes (once, deferred to here
      * because display database isn't ready during chip_InitCard_C).
-     * Phase 8a: no longer virgl-gated -- the CPU compositor serves all
-     * profiles. */
-    if (enabled && gs) {
+     * Only when compositing is enabled (ENV:virtiogpu_composite); the
+     * chip_comp_set_dipf_flags static guard makes this idempotent with
+     * the perf-env call. */
+    if (enabled && gs && gs->composite_enabled) {
         chip_comp_set_dipf_flags(gs);
     }
 

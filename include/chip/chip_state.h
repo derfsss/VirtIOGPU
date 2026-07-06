@@ -601,6 +601,7 @@ struct ChipGPUState {
      * own thread (avoids racing the present path -- same pattern as the
      * virgl_ctx_error recovery). */
     BOOL          virgl2d_enabled;    /* ENV:virtiogpu_virgl2d */
+    BOOL          composite_enabled;  /* ENV:virtiogpu_composite (default OFF) */
     volatile BOOL virgl_needs_resize; /* SetGC -> flush task recover request */
 
     /* ----------------------------------------------------------------

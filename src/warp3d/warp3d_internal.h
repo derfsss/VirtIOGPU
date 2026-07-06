@@ -33,10 +33,23 @@ extern struct V3DIFace  *g_IV3D;       /* chip's "v3d" transport */
 
 /* ---- private per-context driver data (hung off W3D_Context.driver) ---- */
 /* Per-texture GPU handles, hung off W3D_Texture.driver. */
+/* Live-texture magic: the stock FE owns the W3D_Texture and dispatches
+ * texture ops through backend slots whose exact arg layout is RE-derived --
+ * validating this before touching ti makes a mis-decoded slot call a logged
+ * no-op instead of a FreeVec-of-garbage DSI. */
+#define W3DTEX_MAGIC 0x57335458   /* 'W3TX' */
+
 struct W3DTexInfo {
+    uint32 magic;   /* W3DTEX_MAGIC while valid; cleared on free */
     uint32 res;     /* texture resource id */
     uint32 view;    /* sampler view handle */
     uint32 w, h;
+    /* Per-texture W3D_SetTexEnv state (classic W3D texenv is PER-TEXTURE --
+     * the FE dispatches it to backend slot 35 and stores NOTHING itself;
+     * ctx->globaltexenvmode is only the context default).  0 = never set ->
+     * draw falls back to the context global. */
+    uint32 texenv_mode;      /* W3D_REPLACE/DECAL/MODULATE/BLEND or 0 */
+    float  texenv_color[4];  /* env colour (W3D_BLEND) */
 };
 
 struct W3DVirgl {

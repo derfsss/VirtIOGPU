@@ -1039,6 +1039,7 @@ W3D_Texture *w3d_AllocTexObj(struct Warp3DIFace *Self, W3D_Context *ctx,
         return NULL;
     }
     ti->w = w; ti->h = h;
+    ti->magic = W3DTEX_MAGIC;
     tex->driver    = ti;
     tex->texwidth  = (int)w;
     tex->texheight = (int)h;
@@ -1066,21 +1067,33 @@ W3D_Texture *w3d_AllocTexObjTags(struct Warp3DIFace *Self, W3D_Context *ctx,
     return w3d_AllocTexObj(Self, ctx, error, tags);
 }
 
+/* The stock FE OWNS the W3D_Texture (it allocated it in W3D_AllocTexObj and
+ * frees it itself after the backend slot returns) -- we free ONLY our driver
+ * data + GPU resources, and only when the magic proves ti is really ours
+ * (slot arg layouts are RE-derived; a mis-decoded call must be a logged
+ * no-op, not a FreeVec of garbage: that was a suite-found DSI + a
+ * RESOURCE_UNREF storm with pointer-valued ids). */
 void w3d_FreeTexObj(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Texture *tex)
 {
     struct W3DVirgl *wv;
+    struct W3DTexInfo *ti;
     (void)Self;
     if (!tex) return;
+    ti = tex->driver;
+    if (!ti || ti->magic != W3DTEX_MAGIC) {
+        DW3D("FreeTexObj: tex=%p driver=%p NO MAGIC -- ignored\n",
+             (void *)tex, (void *)ti);
+        return;
+    }
     if (ctx && ctx->driver) {
         wv = ctx->driver;
         if (wv->cur_tex == tex) wv->cur_tex = NULL;
-        if (tex->driver && g_IV3D) {
-            struct W3DTexInfo *ti = tex->driver;
+        if (g_IV3D)
             g_IV3D->FreeTexture(g_IV3D, wv->info.token, ti->res, ti->view);
-            IExec->FreeVec(ti);
-        }
     }
-    IExec->FreeVec(tex);
+    ti->magic = 0;
+    tex->driver = NULL;
+    IExec->FreeVec(ti);
 }
 
 uint32 w3d_BindTexture(struct Warp3DIFace *Self, W3D_Context *ctx,
@@ -1132,6 +1145,7 @@ uint32 w3d_RealizeTexture(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Textur
         return W3D_NOMEMORY;
     }
     ti->w = w; ti->h = h;
+    ti->magic = W3DTEX_MAGIC;
     tex->driver = ti;
     DW3D("RealizeTexture: OK %lux%lu res=%lu view=%lu\n",
          (unsigned long)w, (unsigned long)h,
@@ -1339,14 +1353,26 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
         wv->depth_test  = (fe & W3D_ZBUFFER)       != 0;
         wv->depth_write = (fe & W3D_ZBUFFERUPDATE) != 0;
         wv->blend_on    = (fe & W3D_BLENDING)      != 0;
-        /* TexEnv combine mode + env colour live in the public W3D_Context fields
-         * (globaltexenvmode/globaltexenvcolor) -- the FE's SetTexEnv records them
-         * there.  REPLACE keeps the 2-attr path; MODULATE/DECAL/BLEND go wide. */
+        /* TexEnv is PER-TEXTURE in classic W3D: W3D_SetTexEnv dispatches to
+         * backend slot 35 and the FE stores NOTHING in the public context --
+         * ctx->globaltexenvmode only carries the context default (MODULATE on
+         * the stock FE).  Use the bound texture's recorded mode when set
+         * (w3d_suite proved SetTexEnv never reaches the globals). */
         wv->texenv_mode = ctx->globaltexenvmode ? ctx->globaltexenvmode : W3D_REPLACE;
         wv->texenv_color[0] = ctx->globaltexenvcolor[0];
         wv->texenv_color[1] = ctx->globaltexenvcolor[1];
         wv->texenv_color[2] = ctx->globaltexenvcolor[2];
         wv->texenv_color[3] = ctx->globaltexenvcolor[3];
+        if (wv->cur_tex && wv->cur_tex->driver) {
+            struct W3DTexInfo *cti = (struct W3DTexInfo *)wv->cur_tex->driver;
+            if (cti->magic == W3DTEX_MAGIC && cti->texenv_mode) {
+                wv->texenv_mode = cti->texenv_mode;
+                wv->texenv_color[0] = cti->texenv_color[0];
+                wv->texenv_color[1] = cti->texenv_color[1];
+                wv->texenv_color[2] = cti->texenv_color[2];
+                wv->texenv_color[3] = cti->texenv_color[3];
+            }
+        }
     }
     /* Cap each submit so INLINE_WRITE + ALL surrounding state commands fit the
      * SUBMIT_3D buffer (W3D_CMDBUF_DWORDS=16384).  Multiple of 3 so a TRIANGLES
@@ -1453,7 +1479,13 @@ uint32 w3d_ClearBuffers(struct Warp3DIFace *Self, W3D_Context *ctx,
 uint32 w3d_Flush(struct Warp3DIFace *Self, W3D_Context *ctx)
 {
     struct W3DVirgl *wv;
-    uint32 cmd_words[16];
+    /* 64 dwords: bind_rt_framebuffer is ~20 (fb 4 + viewport 8 + scissor 4 +
+     * DSA 2 + blend 2, +11 more if the blend object is dirty) + clear 9.  The
+     * original 16 truncated EXACTLY after fb+viewport+scissor -- a valid
+     * stream with the clear itself silently dropped, so a clear-only frame
+     * never cleared (w3d_suite check 1 caught it; real apps always draw after
+     * clearing, which emits the clear in draw_elements_chunk instead). */
+    uint32 cmd_words[64];
     struct VirglCmdBuf cbuf;
     (void)Self;
 
@@ -1467,11 +1499,16 @@ uint32 w3d_Flush(struct Warp3DIFace *Self, W3D_Context *ctx)
         float cg = (float)((wv->clear_argb >>  8) & 0xFF) / 255.0f;
         float cb = (float)((wv->clear_argb      ) & 0xFF) / 255.0f;
         float ca = (float)((wv->clear_argb >> 24) & 0xFF) / 255.0f;
-        virgl_cmd_init(&cbuf, cmd_words, 16);
+        virgl_cmd_init(&cbuf, cmd_words, 64);
         bind_rt_framebuffer(&cbuf, wv);
         virgl_cmd_clear(&cbuf, 5 /*COLOR0|DEPTH*/, cr, cg, cb, ca, 1.0, 0);
-        g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id,
-                       cbuf.buf, cbuf.dwords);
+        if (cbuf.overflowed) {
+            DW3D("Flush: clear-only cmd buffer OVERFLOWED (%lu/%lu) -- DROPPED\n",
+                 (unsigned long)cbuf.dwords, (unsigned long)cbuf.max_dwords);
+        } else {
+            g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id,
+                           cbuf.buf, cbuf.dwords);
+        }
         wv->pending_clear = FALSE;
     }
     return W3D_SUCCESS;

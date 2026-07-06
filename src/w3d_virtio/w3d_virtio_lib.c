@@ -425,7 +425,36 @@ static uint32 hw_TexAccept(APTR Self, W3D_Context *ctx, W3D_Texture *tex,
                            uint32 a, uint32 b, uint32 c)
 {
     (void)Self; (void)ctx; (void)tex; (void)a; (void)b; (void)c;
-    return 0;   /* W3D_SUCCESS -- filter/env/wrap defaults are fine */
+    return 0;   /* W3D_SUCCESS -- filter/wrap defaults are fine */
+}
+
+/* slot 35 (off 0xc8) = the FE's texenv dispatch: both the AllocTexObj env
+ * sub-call AND every W3D_SetTexEnv(ctx, tex, envparam, envcolor) land here.
+ * Classic W3D texenv is PER-TEXTURE and the FE stores nothing itself
+ * (ctx->globaltexenvmode stays at the context default -- proven by
+ * w3d_suite: REPLACE/DECAL/BLEND all rendered as MODULATE until this
+ * recorder existed).  Record mode+colour in the texture's driver data; the
+ * magic guard makes a mis-decoded arg layout a logged no-op. */
+static uint32 hw_TexEnv(APTR Self, W3D_Context *ctx, W3D_Texture *tex,
+                        uint32 envparam, W3D_Color *envcolor)
+{
+    (void)Self; (void)ctx;
+    DBP("slot35 TexEnv tex=%08lx param=%lu color=%08lx\n",
+        (unsigned long)(APTR)tex, (unsigned long)envparam,
+        (unsigned long)(APTR)envcolor);
+    if (tex && tex->driver && envparam >= W3D_REPLACE && envparam <= W3D_BLEND) {
+        struct W3DTexInfo *ti = (struct W3DTexInfo *)tex->driver;
+        if (ti->magic == W3DTEX_MAGIC) {
+            ti->texenv_mode = envparam;
+            if (envcolor) {
+                ti->texenv_color[0] = envcolor->r;
+                ti->texenv_color[1] = envcolor->g;
+                ti->texenv_color[2] = envcolor->b;
+                ti->texenv_color[3] = envcolor->a;
+            }
+        }
+    }
+    return 0;   /* W3D_SUCCESS (the AllocTexObj sub-call requires ==0) */
 }
 
 /* ---- BATCH A: wire remaining slots to the proven render core (base-60) ----
@@ -457,7 +486,10 @@ static uint32 hw_UploadTexture(APTR S, W3D_Context *ctx, W3D_Texture *tex)
 { (void)S; if (!get_wv(ctx)) return (uint32)W3D_ILLEGALINPUT;
   return w3d_RealizeTexture((struct Warp3DIFace *)0, ctx, tex); }        /* idx 14 */
 static uint32 hw_FreeTexObj(APTR S, W3D_Context *ctx, W3D_Texture *tex)
-{ (void)S; if (!ctx_ok(ctx)) return 0;
+{ (void)S;
+  DBP("slot20 FreeTexObj ctx=%08lx tex=%08lx\n",
+      (unsigned long)(APTR)ctx, (unsigned long)(APTR)tex);
+  if (!ctx_ok(ctx)) return 0;
   w3d_FreeTexObj((struct Warp3DIFace *)0, ctx, tex); return 0; }         /* idx 20 */
 static uint32 hw_LockHW(APTR S, W3D_Context *ctx)     { (void)S; (void)ctx; return 0; } /* 44 */
 static uint32 hw_UnLockHW(APTR S, W3D_Context *ctx)   { (void)S; (void)ctx; return 0; } /* 45 */
@@ -492,7 +524,7 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)hw_s31,
     (APTR)hw_TexAccept, /* 32 tex wrap (off 0xcc) */
     (APTR)hw_s33, (APTR)hw_s34,
-    (APTR)hw_TexAccept, /* 35 tex env / SetTexEnv (off 0xc8) */
+    (APTR)hw_TexEnv, /* 35 tex env / SetTexEnv (off 0xc8) -- records per-tex mode */
     (APTR)hw_s36, /* 36 (was DrawTriStrip: mis-mapped) */
     (APTR)hw_SetZCompare, /* 37 SetZCompareMode (base 60, off 208) */
     (APTR)hw_TexRealize, /* 38 texture realize/upload (AllocTexObj, off 0xd4) */

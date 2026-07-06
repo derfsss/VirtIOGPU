@@ -47,6 +47,7 @@ COMP_TARGET = $(BUILD_DIR)/test_composite
 INFO_TARGET = $(BUILD_DIR)/virtiogpu_info
 GPUVTEST_TARGET = $(BUILD_DIR)/gpu_vtest
 W3DTRI_TARGET = $(BUILD_DIR)/w3dtri
+W3DSUITE_TARGET = $(BUILD_DIR)/w3d_suite
 
 # -----------------------------------------------------------------------
 # Chip driver sources (Picasso96 .chip plugin)
@@ -106,7 +107,7 @@ DEP = $(CHIP_OBJ:.o=.d) $(CHIP_VQ_OBJ:.o=.d) $(W3D_OBJ:.o=.d) $(W3DVIO_OBJ:.o=.d
 
 .PHONY: all clean dist dist-lha help
 
-all: $(CHIP_TARGET) $(W3D_TARGET) $(W3DVIO_TARGET) $(COMP_TARGET) $(INFO_TARGET) $(W3DTRI_TARGET) $(GPUVTEST_TARGET)
+all: $(CHIP_TARGET) $(W3D_TARGET) $(W3DVIO_TARGET) $(COMP_TARGET) $(INFO_TARGET) $(W3DTRI_TARGET) $(W3DSUITE_TARGET) $(GPUVTEST_TARGET)
 
 $(W3DVIO_TARGET): $(W3DVIO_OBJ)
 	$(CC) $(W3DVIO_OBJ) -o $(W3DVIO_TARGET) $(W3DVIO_LDFLAGS)
@@ -168,6 +169,10 @@ $(GPUVTEST_TARGET): src/tools/gpu_vtest.c
 	$(CC) -O2 -Wall -I./include -I./include/gpulib $< -o $@ -lauto
 
 $(W3DTRI_TARGET): src/tools/w3dtri.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -O2 -Wall $< -o $@ -lauto
+
+$(W3DSUITE_TARGET): src/tools/w3d_suite.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) -O2 -Wall $< -o $@ -lauto
 

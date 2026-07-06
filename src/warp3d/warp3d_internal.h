@@ -135,6 +135,14 @@ struct W3DVirgl {
     uint32 rast_s0;                 /* S0 the live object was built with */
     /* per-texture sampler handle allocator (filter/wrap; 340+) */
     uint32 sampler_next;
+    /* fog (W3D_SetFogParams + the W3D_FOGGING mirror bit).  Params are read
+     * from the public ctx->fog per draw; the MODE arrives via the recorder
+     * (default LINEAR).  Factors are CPU-computed per vertex and ride the
+     * wide path's texcoord .z; untextured draws pre-mix into the colour. */
+    BOOL   fog_on;                  /* fe mirror, per draw */
+    uint32 fog_mode;                /* W3D_FOG_LINEAR/EXP/EXP_2/INTERPOLATED */
+    float  fog_start, fog_end, fog_density;
+    float  fog_color[3];
 
     /* bound vertex arrays (W3D_VertexPointer / W3D_ColorPointer) */
     const UBYTE *vtx_ptr;  int vtx_stride;  uint32 vtx_mode;
@@ -148,6 +156,7 @@ struct W3DVirgl {
     uint32       ia_format;
     BOOL         ia_has_color;  uint32 ia_color_off;
     BOOL         ia_has_tcoord; uint32 ia_tcoord_off;
+    BOOL         ia_has_fog;    uint32 ia_fog_off;   /* W3D_FOG_INTERPOLATED */
 
     /* Heap command buffer for large indexed draws (too big for the stack). */
     uint32      *cmdbuf;        /* CMDBUF_DWORDS words (= 64 KiB) */
@@ -196,6 +205,7 @@ uint32       w3d_SetColorMask(struct Warp3DIFace *Self, W3D_Context *ctx, uint32
 uint32       w3d_SetFrontFace(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 dir);
 uint32       w3d_SetTexFilter(W3D_Context *ctx, W3D_Texture *tex, uint32 fmin, uint32 fmag);
 uint32       w3d_SetTexWrap(W3D_Context *ctx, W3D_Texture *tex, uint32 mode_s, uint32 mode_t, W3D_Color *border);
+uint32       w3d_SetFogParams(W3D_Context *ctx, W3D_Fog *params, uint32 mode);
 uint32       w3d_SetDrawRegion(struct Warp3DIFace *Self, W3D_Context *ctx, struct BitMap *bm, int yoff, W3D_Scissor *sc);
 uint32       w3d_DrawTriangle(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Triangle *tri);
 uint32       w3d_DrawTriangleV(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_TriangleV *t);

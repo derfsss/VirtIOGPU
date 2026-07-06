@@ -635,16 +635,26 @@ static const char tgsi_vs_tc_color[] =
     "  3: END\n";
 
 /* W3D_MODULATE: out = texel * vertex_colour (lit texturing). */
+/* All W3D wide-path fragment shaders end with a FOG mix: factor rides the
+ * otherwise-unused texcoord .z (per-vertex, CPU-computed; 1.0 = no fog makes
+ * the tail an exact identity), fog colour in CONST[1] (CONST[0] = the BLEND
+ * env colour; the render core uploads both every wide chunk). */
 static const char tgsi_fs_modulate[] =
     "FRAG\n"
     "DCL IN[0], GENERIC[0], PERSPECTIVE\n"
     "DCL IN[1], GENERIC[1], PERSPECTIVE\n"
     "DCL OUT[0], COLOR\n"
     "DCL SAMP[0]\n"
+    "DCL CONST[0]\n"
+    "DCL CONST[1]\n"
     "DCL TEMP[0]\n"
+    "DCL TEMP[1]\n"
     "  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n"
-    "  1: MUL OUT[0], TEMP[0], IN[1]\n"
-    "  2: END\n";
+    "  1: MUL TEMP[0], TEMP[0], IN[1]\n"
+    "  2: LRP TEMP[1].xyz, IN[0].zzzz, TEMP[0], CONST[1]\n"
+    "  3: MOV TEMP[1].w, TEMP[0]\n"
+    "  4: MOV OUT[0], TEMP[1]\n"
+    "  5: END\n";
 
 /* W3D_DECAL: RGB = lerp(frag.rgb, texel.rgb, texel.a); A = frag.a. */
 static const char tgsi_fs_decal[] =
@@ -653,11 +663,36 @@ static const char tgsi_fs_decal[] =
     "DCL IN[1], GENERIC[1], PERSPECTIVE\n"
     "DCL OUT[0], COLOR\n"
     "DCL SAMP[0]\n"
+    "DCL CONST[0]\n"
+    "DCL CONST[1]\n"
     "DCL TEMP[0]\n"
+    "DCL TEMP[1]\n"
+    "DCL TEMP[2]\n"
     "  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n"
-    "  1: LRP OUT[0].xyz, TEMP[0].wwww, TEMP[0], IN[1]\n"
-    "  2: MOV OUT[0].w, IN[1]\n"
-    "  3: END\n";
+    "  1: LRP TEMP[1].xyz, TEMP[0].wwww, TEMP[0], IN[1]\n"
+    "  2: MOV TEMP[1].w, IN[1]\n"
+    "  3: LRP TEMP[2].xyz, IN[0].zzzz, TEMP[1], CONST[1]\n"
+    "  4: MOV TEMP[2].w, TEMP[1]\n"
+    "  5: MOV OUT[0], TEMP[2]\n"
+    "  6: END\n";
+
+/* REPLACE + fog: pure texel through the fog mix (the plain REPLACE path is
+ * the narrow 2-attr pipeline; this wide variant exists only for fogging). */
+static const char tgsi_fs_repfog[] =
+    "FRAG\n"
+    "DCL IN[0], GENERIC[0], PERSPECTIVE\n"
+    "DCL IN[1], GENERIC[1], PERSPECTIVE\n"
+    "DCL OUT[0], COLOR\n"
+    "DCL SAMP[0]\n"
+    "DCL CONST[0]\n"
+    "DCL CONST[1]\n"
+    "DCL TEMP[0]\n"
+    "DCL TEMP[1]\n"
+    "  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n"
+    "  1: LRP TEMP[1].xyz, IN[0].zzzz, TEMP[0], CONST[1]\n"
+    "  2: MOV TEMP[1].w, TEMP[0]\n"
+    "  3: MOV OUT[0], TEMP[1]\n"
+    "  4: END\n";
 
 /* W3D_BLEND: RGB = lerp(frag.rgb, env.rgb, texel.rgb); A = frag.a * texel.a. */
 static const char tgsi_fs_blend[] =
@@ -667,13 +702,17 @@ static const char tgsi_fs_blend[] =
     "DCL OUT[0], COLOR\n"
     "DCL SAMP[0]\n"
     "DCL CONST[0]\n"
+    "DCL CONST[1]\n"
     "DCL TEMP[0]\n"
     "DCL TEMP[1]\n"
+    "DCL TEMP[2]\n"
     "  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n"
     "  1: LRP TEMP[1].xyz, TEMP[0], CONST[0], IN[1]\n"
     "  2: MUL TEMP[1].w, IN[1], TEMP[0]\n"
-    "  3: MOV OUT[0], TEMP[1]\n"
-    "  4: END\n";
+    "  3: LRP TEMP[2].xyz, IN[0].zzzz, TEMP[1], CONST[1]\n"
+    "  4: MOV TEMP[2].w, TEMP[1]\n"
+    "  5: MOV OUT[0], TEMP[2]\n"
+    "  6: END\n";
 
 void virgl_setup_passthrough_vs(struct VirglCmdBuf *cbuf, uint32 handle)
 {
@@ -715,6 +754,11 @@ void virgl_setup_blend_fs(struct VirglCmdBuf *cbuf, uint32 handle)
 {
     DCHIP("virgl_setup_blend_fs: handle=%lu", handle);
     virgl_cmd_create_shader(cbuf, handle, PIPE_SHADER_FRAGMENT, tgsi_fs_blend);
+}
+void virgl_setup_repfog_fs(struct VirglCmdBuf *cbuf, uint32 handle)
+{
+    DCHIP("virgl_setup_repfog_fs: handle=%lu", handle);
+    virgl_cmd_create_shader(cbuf, handle, PIPE_SHADER_FRAGMENT, tgsi_fs_repfog);
 }
 
 /* SET_CONSTANT_BUFFER -- upload float constants to a shader stage's CONST file.

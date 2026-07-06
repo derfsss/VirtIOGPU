@@ -80,6 +80,7 @@
 #define V2D_HANDLE_FS_DECAL      113
 #define V2D_HANDLE_FS_BLEND      114
 #define V2D_HANDLE_VE3           115   /* 3-attr VE (0/16/32, stride 48)        */
+#define V2D_HANDLE_FS_REPFOG     116   /* REPLACE+fog FS (W3D wide path)        */
 
 /* Vertex buffer size in bytes.  64 KiB so warp3d.library can batch large
  * indexed draws (e.g. the cow demo) into one INLINE_WRITE+DRAW_VBO submit;
@@ -299,6 +300,7 @@ BOOL chip_virgl_init_2d(struct ChipGPUState *gs)
      * One shader per submit (the documented one-shader-per-submission rule). */
     gs->virgl_2d_vs3 = 0; gs->virgl_2d_fs_modulate = 0;
     gs->virgl_2d_fs_decal = 0; gs->virgl_2d_fs_blend = 0;
+    gs->virgl_2d_fs_repfog = 0;
     if (gs->virgl_shaders_ok) {
         virgl_cmd_reset(&cbuf); virgl_setup_tc_color_vs(&cbuf, V2D_HANDLE_VS3);
         if (virgl_submit(gs, ctx_id, &cbuf)) gs->virgl_2d_vs3 = V2D_HANDLE_VS3;
@@ -308,9 +310,12 @@ BOOL chip_virgl_init_2d(struct ChipGPUState *gs)
         if (virgl_submit(gs, ctx_id, &cbuf)) gs->virgl_2d_fs_decal = V2D_HANDLE_FS_DECAL;
         virgl_cmd_reset(&cbuf); virgl_setup_blend_fs(&cbuf, V2D_HANDLE_FS_BLEND);
         if (virgl_submit(gs, ctx_id, &cbuf)) gs->virgl_2d_fs_blend = V2D_HANDLE_FS_BLEND;
-        DCHIP("virgl_init_2d: texenv shaders vs3=%lu mod=%lu dec=%lu bln=%lu",
+        virgl_cmd_reset(&cbuf); virgl_setup_repfog_fs(&cbuf, V2D_HANDLE_FS_REPFOG);
+        if (virgl_submit(gs, ctx_id, &cbuf)) gs->virgl_2d_fs_repfog = V2D_HANDLE_FS_REPFOG;
+        DCHIP("virgl_init_2d: texenv shaders vs3=%lu mod=%lu dec=%lu bln=%lu fog=%lu",
               (unsigned long)gs->virgl_2d_vs3, (unsigned long)gs->virgl_2d_fs_modulate,
-              (unsigned long)gs->virgl_2d_fs_decal, (unsigned long)gs->virgl_2d_fs_blend);
+              (unsigned long)gs->virgl_2d_fs_decal, (unsigned long)gs->virgl_2d_fs_blend,
+              (unsigned long)gs->virgl_2d_fs_repfog);
     }
 
     if (!gs->virgl_shaders_ok) {
@@ -641,6 +646,7 @@ BOOL chip_virgl_recover_2d(struct ChipGPUState *gs)
     gs->virgl_2d_fs_modulate = 0;
     gs->virgl_2d_fs_decal = 0;
     gs->virgl_2d_fs_blend = 0;
+    gs->virgl_2d_fs_repfog = 0;
     gs->virgl_2d_ve3 = 0;
     gs->virgl_shaders_ok = FALSE;
     gs->virgl_samplers_ok = FALSE;

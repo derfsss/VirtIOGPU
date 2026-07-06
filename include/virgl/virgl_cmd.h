@@ -500,6 +500,7 @@ void virgl_setup_tc_color_vs(struct VirglCmdBuf *cbuf, uint32 handle);
 void virgl_setup_modulate_fs(struct VirglCmdBuf *cbuf, uint32 handle);
 void virgl_setup_decal_fs(struct VirglCmdBuf *cbuf, uint32 handle);
 void virgl_setup_blend_fs(struct VirglCmdBuf *cbuf, uint32 handle);
+void virgl_setup_repfog_fs(struct VirglCmdBuf *cbuf, uint32 handle);
 void virgl_cmd_set_constant_buffer(struct VirglCmdBuf *cbuf, uint32 shader_type,
                                    uint32 index, const float *data, uint32 nfloats);
 

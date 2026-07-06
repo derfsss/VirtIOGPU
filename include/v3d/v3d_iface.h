@@ -47,6 +47,7 @@ struct V3DContextInfo {
     uint32 fs_decal_handle;    /* W3D_DECAL FS                                 */
     uint32 fs_blend_handle;    /* W3D_BLEND FS (env colour in CONST[0])        */
     uint32 ve3_handle;         /* 3-attr vertex elements (stride 48)           */
+    uint32 fs_repfog_handle;   /* REPLACE+fog FS (fog colour in CONST[1])      */
 };
 
 struct V3DIFace {

@@ -508,6 +508,18 @@ static uint32 hw_FreeTexObj(APTR S, W3D_Context *ctx, W3D_Texture *tex)
       (unsigned long)(APTR)ctx, (unsigned long)(APTR)tex);
   if (!ctx_ok(ctx)) return 0;
   w3d_FreeTexObj((struct Warp3DIFace *)0, ctx, tex); return 0; }         /* idx 20 */
+/* slot 31 = W3D_SetFogParams(ctx, W3D_Fog *params, uint32 mode) -- fe5327
+ * disasm: the FE VALIDATES (params non-NULL, fog_start > fog_end -- W3D fog
+ * ranges DECREASE with distance -- density >= 0), stores into ctx->fog, then
+ * dispatches off 184 = BASE-60 slot 31 (runtime-confirmed: slot 31 (ctx,
+ * params, mode=1/2)).  The mode only exists in this call. */
+static uint32 hw_SetFogParams(APTR S, W3D_Context *ctx, W3D_Fog *params, uint32 mode)
+{ (void)S;
+  DBP("slot27 SetFogParams params=%08lx mode=%lu\n",
+      (unsigned long)(APTR)params, (unsigned long)mode);
+  if (!get_wv(ctx)) return 0;
+  return w3d_SetFogParams(ctx, params, mode); }
+
 /* slot 28 = W3D_SetAlphaMode(ctx, mode, W3D_Float *refval) -- confirmed by
  * suite telemetry: slot 28 (ctx, 5=W3D_A_GREATER, &ref). */
 static uint32 hw_SetAlphaMode(APTR S, W3D_Context *ctx, uint32 mode, W3D_Float *ref)
@@ -559,7 +571,7 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)hw_SetAlphaMode,  /* 28 SetAlphaMode (suite telemetry) */
     (APTR)w3d_SetBlendMode, /* 29 SetBlendMode (base 60) */
     (APTR)hw_TexFilter, /* 30 tex filter (AllocTexObj sub-call + SetFilter) */
-    (APTR)hw_s31,
+    (APTR)hw_SetFogParams, /* 31 SetFogParams (off 184; runtime-confirmed) */
     (APTR)hw_TexWrap,   /* 32 tex wrap (off 0xcc; + SetWrapMode) */
     (APTR)hw_SetColorMask,  /* 33 SetColorMask (suite telemetry) */
     (APTR)hw_s34,

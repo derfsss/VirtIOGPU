@@ -409,6 +409,50 @@ static void bind_dsa(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
     }
 }
 
+/* exp(-x) for x >= 0 without libm (4th-order series reciprocal; <0.5% error
+ * for x in 0..1.5, monotonic and clamped -- fog factors, not science). */
+static float exp_neg(float x)
+{
+    float d;
+    if (x <= 0.0f) return 1.0f;
+    if (x > 20.0f) return 0.0f;
+    d = 1.0f + x + 0.5f * x * x + 0.166667f * x * x * x
+        + 0.0416667f * x * x * x * x;
+    return 1.0f / d;
+}
+
+/* GL-style fog factor from the vertex's screen z (or the per-vertex fog
+ * coordinate for W3D_FOG_INTERPOLATED).  1 = unfogged, 0 = full fog. */
+static float fog_factor(const struct W3DVirgl *wv, const UBYTE *v, float z)
+{
+    float f;
+    switch (wv->fog_mode) {
+    case W3D_FOG_EXP:
+        f = exp_neg(wv->fog_density * z);
+        break;
+    case W3D_FOG_EXP_2: {
+        float t = wv->fog_density * z;
+        f = exp_neg(t * t);
+        break;
+    }
+    case W3D_FOG_INTERPOLATED:
+        f = wv->ia_has_fog ? *(const float *)(v + wv->ia_fog_off) : 1.0f;
+        break;
+    default: {  /* W3D_FOG_LINEAR -- W3D fog ranges DECREASE with distance
+                 * (the FE's SetFogParams validation REQUIRES start > end,
+                 * fe5327 disasm @3a3c: rejects start <= end).  Our fog
+                 * coordinate is 1-z (near = 1, far = 0), so the canonical
+                 * start=1/end=0 gives f = 1-z. */
+        float den = wv->fog_start - wv->fog_end;
+        f = (den > 1e-6f || den < -1e-6f)
+            ? ((1.0f - z) - wv->fog_end) / den : 1.0f;
+        break;
+    }
+    }
+    if (f < 0.0f) f = 0.0f; else if (f > 1.0f) f = 1.0f;
+    return f;
+}
+
 /* Resolve the sampler for a textured draw: the texture's private sampler
  * (rebuilt lazily HERE, inside the draw's cbuf, when W3D_SetFilter /
  * W3D_SetWrapMode changed it) or the chip's shared linear sampler when the
@@ -744,6 +788,9 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
         wv->cull_on = FALSE; wv->front_ccw = TRUE;
         wv->rast_h = 0;
         wv->sampler_next = 340;
+        wv->fog_on = FALSE; wv->fog_mode = 0;
+        wv->fog_start = 0.0f; wv->fog_end = 1.0f; wv->fog_density = 1.0f;
+        wv->fog_color[0] = wv->fog_color[1] = wv->fog_color[2] = 0.0f;
         virgl_cmd_init(&bcb, bw2, 64);
         virgl_cmd_create_blend(&bcb, W3D_HANDLE_BLEND_OPAQUE, 0, VIRGL_BLEND_RT_OPAQUE);
         virgl_cmd_create_blend(&bcb, W3D_HANDLE_BLEND_FUNC, 0,
@@ -1035,6 +1082,27 @@ uint32 w3d_SetTexFilter(W3D_Context *ctx, W3D_Texture *tex,
     }
     DW3D("SetFilter: tex=%p min=%lu mag=%lu\n", (void *)tex,
          (unsigned long)fmin, (unsigned long)fmag);
+    return W3D_SUCCESS;
+}
+
+/* Fog recorder: params ALSO live in the public ctx->fog (re-read per draw);
+ * this call is the only carrier of the MODE. */
+uint32 w3d_SetFogParams(W3D_Context *ctx, W3D_Fog *params, uint32 mode)
+{
+    struct W3DVirgl *wv;
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    if (mode >= W3D_FOG_LINEAR && mode <= W3D_FOG_INTERPOLATED)
+        wv->fog_mode = mode;
+    if (params) {
+        wv->fog_start   = params->fog_start;
+        wv->fog_end     = params->fog_end;
+        wv->fog_density = params->fog_density;
+        wv->fog_color[0] = params->fog_color.r;
+        wv->fog_color[1] = params->fog_color.g;
+        wv->fog_color[2] = params->fog_color.b;
+    }
+    DW3D("SetFogParams: mode=%lu\n", (unsigned long)mode);
     return W3D_SUCCESS;
 }
 
@@ -1423,10 +1491,11 @@ uint32 w3d_InterleavedArray(struct Warp3DIFace *Self, W3D_Context *ctx,
     wv->ia_format = format;
     wv->ia_has_color = FALSE;  wv->ia_color_off  = 0;
     wv->ia_has_tcoord = FALSE; wv->ia_tcoord_off = 0;
+    wv->ia_has_fog = FALSE;    wv->ia_fog_off    = 0;
 
     /* position = 3 floats @ 0; then attributes in ascending VFORMAT bit order */
     off = 3 * 4;
-    if (format & W3D_VFORMAT_FOG)        off += 4;
+    if (format & W3D_VFORMAT_FOG)        { wv->ia_has_fog = TRUE; wv->ia_fog_off = off; off += 4; }
     if (format & W3D_VFORMAT_COLOR)      { wv->ia_has_color = TRUE; wv->ia_color_off = off; off += 16; }
     else if (format & W3D_VFORMAT_PACK_COLOR) { off += 4; }  /* packed RGBA -- unsupported colour for now */
     if (format & W3D_VFORMAT_SCOLOR)     off += 16;
@@ -1449,14 +1518,17 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
     /* Textured draw if a texture is bound and the array carries texcoords. */
     struct W3DTexInfo *ti = (wv->cur_tex && wv->cur_tex->driver && wv->ia_has_tcoord)
                             ? (struct W3DTexInfo *)wv->cur_tex->driver : NULL;
-    /* WIDE combine path: textured + non-REPLACE + the 3-attr objects exist + the
-     * array carries colour.  Else the EXACT original 8-float/stride-32 path runs
-     * (REPLACE + untextured = R8-safe, byte-identical). */
-    BOOL wide = (ti && wv->texenv_mode != W3D_REPLACE && wv->ia_has_color &&
+    /* WIDE combine path: textured + (non-REPLACE texenv OR fogging) + the
+     * 3-attr objects exist + the array carries colour.  Else the EXACT
+     * original 8-float/stride-32 path runs (plain REPLACE + untextured =
+     * R8-safe, byte-identical; untextured fog is pre-mixed on the CPU). */
+    BOOL wide = (ti && (wv->texenv_mode != W3D_REPLACE || wv->fog_on) &&
+                 wv->ia_has_color &&
                  wv->info.vs3_handle && wv->info.ve3_handle &&
                  ((wv->texenv_mode == W3D_MODULATE && wv->info.fs_modulate_handle) ||
                   (wv->texenv_mode == W3D_DECAL    && wv->info.fs_decal_handle)    ||
-                  (wv->texenv_mode == W3D_BLEND    && wv->info.fs_blend_handle)));
+                  (wv->texenv_mode == W3D_BLEND    && wv->info.fs_blend_handle)    ||
+                  (wv->texenv_mode == W3D_REPLACE  && wv->info.fs_repfog_handle)));
     num_floats = nverts * (wide ? 12 : 8);
 
     virgl_cmd_init(&cbuf, wv->cmdbuf, W3D_CMDBUF_DWORDS);
@@ -1472,19 +1544,26 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
     }
 
     if (wide) {
-        /* MODULATE/DECAL/BLEND: 3-attr VS (pos+tc+colour) + the mode's FS. */
+        /* MODULATE/DECAL/BLEND/REPLACE+fog: 3-attr VS + the mode's FS. */
         uint32 fs = (wv->texenv_mode == W3D_MODULATE) ? wv->info.fs_modulate_handle
                   : (wv->texenv_mode == W3D_DECAL)    ? wv->info.fs_decal_handle
-                  :                                     wv->info.fs_blend_handle;
+                  : (wv->texenv_mode == W3D_BLEND)    ? wv->info.fs_blend_handle
+                  :                                     wv->info.fs_repfog_handle;
         uint32 samp = tex_sampler(&cbuf, wv, ti);
+        /* CONST[0] = BLEND env colour, CONST[1] = fog colour.  Uploaded on
+         * EVERY wide chunk: all wide FS end with the fog LRP, and a factor of
+         * 1.0 must multiply a defined (not NaN) CONST[1]. */
+        float consts[8];
+        consts[0] = wv->texenv_color[0]; consts[1] = wv->texenv_color[1];
+        consts[2] = wv->texenv_color[2]; consts[3] = wv->texenv_color[3];
+        consts[4] = wv->fog_color[0];    consts[5] = wv->fog_color[1];
+        consts[6] = wv->fog_color[2];    consts[7] = 1.0f;
         virgl_cmd_bind_object(&cbuf, VIRGL_OBJECT_VERTEX_ELEMENTS, wv->info.ve3_handle);
         virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_VERTEX, wv->info.vs3_handle);
         virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, fs);
         virgl_cmd_bind_sampler_states(&cbuf, PIPE_SHADER_FRAGMENT, 0, 1, &samp);
         virgl_cmd_set_sampler_views(&cbuf, PIPE_SHADER_FRAGMENT, 0, 1, &ti->view);
-        if (wv->texenv_mode == W3D_BLEND)
-            virgl_cmd_set_constant_buffer(&cbuf, PIPE_SHADER_FRAGMENT, 0,
-                                          wv->texenv_color, 4);
+        virgl_cmd_set_constant_buffer(&cbuf, PIPE_SHADER_FRAGMENT, 0, consts, 8);
         wv->ve3_bound = TRUE;
     } else {
         /* ORIGINAL 2-attr path (REPLACE / untextured).  Rebind VE *only* to undo a
@@ -1533,11 +1612,13 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
             virgl_emit_float(&cbuf, 1.0f);                    /* w */
         }
         if (wide) {
-            /* GENERIC[0]=texcoord, GENERIC[1]=vertex colour (12 floats/vert). */
+            /* GENERIC[0]=texcoord (+fog factor in .z), GENERIC[1]=colour. */
             const float *t = (const float *)(v + wv->ia_tcoord_off);
             const float *c = (const float *)(v + wv->ia_color_off);
+            float ff = wv->fog_on
+                       ? fog_factor(wv, v, *(const float *)(v + 8)) : 1.0f;
             virgl_emit_float(&cbuf, t[0]); virgl_emit_float(&cbuf, t[1]);
-            virgl_emit_float(&cbuf, 0.0f); virgl_emit_float(&cbuf, 1.0f);
+            virgl_emit_float(&cbuf, ff);   virgl_emit_float(&cbuf, 1.0f);
             virgl_emit_float(&cbuf, c[0]); virgl_emit_float(&cbuf, c[1]);
             virgl_emit_float(&cbuf, c[2]); virgl_emit_float(&cbuf, c[3]);
         } else if (ti) {
@@ -1550,10 +1631,20 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
             virgl_emit_float(&cbuf, 0.0f);
             virgl_emit_float(&cbuf, 1.0f);
         } else if (wv->ia_has_color) {
+            /* untextured: fog pre-mixed into the vertex colour on the CPU
+             * (per-vertex fog, linearly interpolated -- GL fixed-function
+             * semantics; alpha stays unfogged) */
             const float *c = (const float *)(v + wv->ia_color_off);
-            virgl_emit_float(&cbuf, c[0]);
-            virgl_emit_float(&cbuf, c[1]);
-            virgl_emit_float(&cbuf, c[2]);
+            if (wv->fog_on) {
+                float ff = fog_factor(wv, v, *(const float *)(v + 8));
+                virgl_emit_float(&cbuf, ff * c[0] + (1.0f - ff) * wv->fog_color[0]);
+                virgl_emit_float(&cbuf, ff * c[1] + (1.0f - ff) * wv->fog_color[1]);
+                virgl_emit_float(&cbuf, ff * c[2] + (1.0f - ff) * wv->fog_color[2]);
+            } else {
+                virgl_emit_float(&cbuf, c[0]);
+                virgl_emit_float(&cbuf, c[1]);
+                virgl_emit_float(&cbuf, c[2]);
+            }
             virgl_emit_float(&cbuf, c[3]);
         } else {
             virgl_emit_float(&cbuf, 1.0f); virgl_emit_float(&cbuf, 1.0f);
@@ -1608,6 +1699,18 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
          * (suite-proven: a screen-space-CCW quad is window-CW), so
          * W3D_CCW-front == GL front_ccw 0. */
         wv->front_ccw   = (ctx->FrontFaceOrder == W3D_CW);
+        /* Fog params live in the public ctx->fog; the MODE arrives via the
+         * SetFogParams recorder (default LINEAR when never called). */
+        wv->fog_on = (fe & W3D_FOGGING) != 0;
+        if (wv->fog_on) {
+            wv->fog_start   = ctx->fog.fog_start;
+            wv->fog_end     = ctx->fog.fog_end;
+            wv->fog_density = ctx->fog.fog_density;
+            wv->fog_color[0] = ctx->fog.fog_color.r;
+            wv->fog_color[1] = ctx->fog.fog_color.g;
+            wv->fog_color[2] = ctx->fog.fog_color.b;
+            if (!wv->fog_mode) wv->fog_mode = W3D_FOG_LINEAR;
+        }
         /* TexEnv is PER-TEXTURE in classic W3D: W3D_SetTexEnv dispatches to
          * backend slot 35 and the FE stores NOTHING in the public context --
          * ctx->globaltexenvmode only carries the context default (MODULATE on
@@ -1639,7 +1742,7 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
      * reported "Illegal command buffer" and poisoned the host context = the
      * June 2026 grey-window freeze.  REPLACE path = 8 floats/vert -> 1998
      * (=666*3), unchanged and historically proven. */
-    CHUNK = (wv->texenv_mode != W3D_REPLACE) ? 1338U : 1998U;
+    CHUNK = (wv->texenv_mode != W3D_REPLACE || wv->fog_on) ? 1338U : 1998U;
     /* Transition-only census: one line per texenv MODE CHANGE tells us which
      * path (WIDE combine vs narrow REPLACE) a real workload actually runs --
      * the June grey-window revert lacked exactly this visibility. */

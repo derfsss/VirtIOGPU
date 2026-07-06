@@ -509,6 +509,58 @@ int main(void)
         IW3D->W3D_BindTexture(g_ctx, 0, NULL);
     }
 
+    /* 18-23: fog -- LINEAR at three depths (untextured = CPU premix),
+     * textured REPLACE+fog (wide repfog FS), EXP, and fog-off identity */
+    /* classic call order: the FOGGING state must be enabled BEFORE
+     * SetFogParams or the stock FE refuses with W3D_ILLEGALINPUT */
+    IW3D->W3D_SetState(g_ctx, W3D_FOGGING, W3D_ENABLE);
+    {
+        W3D_Fog fog;
+        fog.fog_start = 1.0f; fog.fog_end = 0.0f; fog.fog_density = 1.0f;  /* W3D: start > end */
+        fog.fog_color.r = 1.0f; fog.fog_color.g = 0.0f; fog.fog_color.b = 0.0f;
+        rc = IW3D->W3D_SetFogParams(g_ctx, &fog, W3D_FOG_LINEAR);
+        NOTE("SetFogParams(LINEAR red 0..1) rc=%lu", (unsigned long)rc);
+    }
+    IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+    draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f);
+    present();
+    check_rgb("fog LINEAR z=0: unfogged green", 0, 255, 0);
+    IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+    draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.999f, 0.0f, 1.0f, 0.0f, 1.0f);
+    present();
+    check_rgb("fog LINEAR z=1: full fog red", 255, 0, 0);
+    IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+    draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.5f, 0.0f, 1.0f, 0.0f, 1.0f);
+    present();
+    check_rgb("fog LINEAR z=0.5: half fog", 127, 127, 0);
+    if (tex_blue) {
+        IW3D->W3D_BindTexture(g_ctx, 0, tex_blue);
+        IW3D->W3D_SetTexEnv(g_ctx, tex_blue, W3D_REPLACE, NULL);
+        IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+        draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.5f, 1.0f, 1.0f, 1.0f, 1.0f);
+        present();
+        check_rgb("fog on REPLACE texture (wide repfog FS)", 127, 0, 127);
+        IW3D->W3D_BindTexture(g_ctx, 0, NULL);
+    }
+    {
+        W3D_Fog fog;
+        fog.fog_start = 1.0f; fog.fog_end = 0.0f; fog.fog_density = 1.0f;  /* W3D: start > end */
+        fog.fog_color.r = 1.0f; fog.fog_color.g = 0.0f; fog.fog_color.b = 0.0f;
+        IW3D->W3D_SetFogParams(g_ctx, &fog, W3D_FOG_EXP);
+    }
+    /* z chosen where EXP and LINEAR differ by ~90/channel -- if the mode
+     * never reached the driver this check catches it (LINEAR would give
+     * (242,13,0)) */
+    IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+    draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.95f, 0.0f, 1.0f, 0.0f, 1.0f);
+    present();
+    check_rgb("fog EXP z=0.95 d=1: f=0.39", 156, 99, 0);
+    IW3D->W3D_SetState(g_ctx, W3D_FOGGING, W3D_DISABLE);
+    IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+    draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.9f, 0.0f, 1.0f, 0.0f, 1.0f);
+    present();
+    check_rgb("fog off: identity restored", 0, 255, 0);
+
     /* --- 8b telemetry: what does the FE claim for the not-yet-done set? --- */
     NOTE("INFO SetState rc: FOG=%lu ALPHATEST=%lu CULL=%lu STENCIL=%lu (0=accepted)",
          (unsigned long)IW3D->W3D_SetState(g_ctx, W3D_FOGGING,       W3D_ENABLE),

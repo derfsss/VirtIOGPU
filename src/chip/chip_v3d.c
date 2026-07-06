@@ -154,7 +154,7 @@ static BOOL v3d_AllocDepthBuffer(struct V3DIFace *Self, APTR token,
 
     res = chip_alloc_resource_id(gs);
     if (!chip_ResourceCreate3D(gs, res, PIPE_TEXTURE_2D,
-            PIPE_FORMAT_Z24X8_UNORM, PIPE_BIND_DEPTH_STENCIL,
+            PIPE_FORMAT_S8_UINT_Z24_UNORM, PIPE_BIND_DEPTH_STENCIL,   /* stencil-capable; virglrenderer tables S8Z24 (GL_DEPTH24_STENCIL8), NOT Z24S8 */
             w, h, 1, 1, 0, 0, 0)) {
         DCHIP("v3d: AllocDepthBuffer RESOURCE_CREATE_3D failed");
         return FALSE;
@@ -163,7 +163,7 @@ static BOOL v3d_AllocDepthBuffer(struct V3DIFace *Self, APTR token,
 
     surf = v3d_handle(gs);
     virgl_cmd_init(&cb, words, 16);
-    virgl_cmd_create_surface(&cb, surf, res, PIPE_FORMAT_Z24X8_UNORM, 0, 0);
+    virgl_cmd_create_surface(&cb, surf, res, PIPE_FORMAT_S8_UINT_Z24_UNORM, 0, 0);
     if (!chip_Submit3D(gs, gs->virgl_2d_ctx, cb.buf, cb.dwords * 4)) {
         DCHIP("v3d: AllocDepthBuffer create_surface FAILED");
         chip_ResourceUnref(gs, res);

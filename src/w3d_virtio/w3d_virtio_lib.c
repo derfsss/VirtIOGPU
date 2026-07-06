@@ -539,6 +539,47 @@ static uint32 hw_SetColorMask(APTR S, W3D_Context *ctx, uint32 r, uint32 g,
   if (!get_wv(ctx)) return 0;
   return w3d_SetColorMask((struct Warp3DIFace *)0, ctx, r, g, b, a); }
 
+/* Stencil group (map2 offs are BASE-60: index = (off-60)/4): AllocStencil
+ * off 88 -> 7, ClearStencil off 100 -> 10, SetStencilFunc off 196 -> 34,
+ * SetStencilOp off 248 -> 47, SetWriteMask off 252 -> 48.  The stencil
+ * plane lives in the Z24S8 depth buffer, so Alloc/Free are acks. */
+static uint32 hw_AllocStencil(APTR S, W3D_Context *ctx)
+{ (void)S;
+  DBP("slot7 AllocStencilBuffer\n");
+  return get_wv(ctx) ? 0 : (uint32)W3D_ILLEGALINPUT; }
+static uint32 hw_ClearStencil(APTR S, W3D_Context *ctx, uint32 *clearval)
+{ (void)S;
+  DBP("slot10 ClearStencilBuffer val=%08lx\n", (unsigned long)(APTR)clearval);
+  if (!get_wv(ctx)) return 0;
+  return w3d_ClearStencil(ctx, clearval); }
+static uint32 hw_SetStencilFunc(APTR S, W3D_Context *ctx, uint32 func,
+                                uint32 refval, uint32 mask)
+{ (void)S;
+  DBP("slot34 SetStencilFunc f=%lu ref=%lu m=%lx\n", (unsigned long)func,
+      (unsigned long)refval, (unsigned long)mask);
+  if (!get_wv(ctx)) return 0;
+  return w3d_SetStencilFunc(ctx, func, refval, mask); }
+static uint32 hw_SetStencilOp(APTR S, W3D_Context *ctx, uint32 sfail,
+                              uint32 dpfail, uint32 dppass)
+{ (void)S;
+  DBP("slot47 SetStencilOp %lu/%lu/%lu\n", (unsigned long)sfail,
+      (unsigned long)dpfail, (unsigned long)dppass);
+  if (!get_wv(ctx)) return 0;
+  return w3d_SetStencilOp(ctx, sfail, dpfail, dppass); }
+static uint32 hw_SetWriteMask(APTR S, W3D_Context *ctx, uint32 mask)
+{ (void)S;
+  DBP("slot48 SetWriteMask %lx\n", (unsigned long)mask);
+  if (!get_wv(ctx)) return 0;
+  return w3d_SetStencilWriteMask(ctx, mask); }
+
+/* Immediate points/lines: DrawLine off 120 -> 15, DrawPoint off 124 -> 16 */
+static uint32 hw_DrawLine(APTR S, W3D_Context *ctx, W3D_Line *line)
+{ (void)S; if (!get_wv(ctx)) return (uint32)W3D_ILLEGALINPUT;
+  return w3d_DrawLine((struct Warp3DIFace *)0, ctx, line); }
+static uint32 hw_DrawPoint(APTR S, W3D_Context *ctx, W3D_Point *point)
+{ (void)S; if (!get_wv(ctx)) return (uint32)W3D_ILLEGALINPUT;
+  return w3d_DrawPoint((struct Warp3DIFace *)0, ctx, point); }
+
 static uint32 hw_LockHW(APTR S, W3D_Context *ctx)     { (void)S; (void)ctx; return 0; } /* 44 */
 static uint32 hw_UnLockHW(APTR S, W3D_Context *ctx)   { (void)S; (void)ctx; return 0; } /* 45 */
 static uint32 hw_SetDrawRegion(APTR S, W3D_Context *ctx){ (void)S; (void)ctx; return 0; } /* 58 */
@@ -554,13 +595,16 @@ static const APTR _main_Vectors[] __attribute__((used)) =
      * tmp_re/fe5327_map2.txt (backend off = 76 + slot*4). */
     (APTR)hw_s4,            /* 4  (AllocZBuffer is idx 8 at base 60) */
     (APTR)hw_s5,            /* 5  CheckIdle->1  */
-    (APTR)hw_s6,            /* 6  ClearStencilBuffer */
-    (APTR)hw_s7,            /* 7  (ClearBuffers is idx 65 at base 60) */
+    (APTR)hw_s6,            /* 6  */
+    (APTR)hw_AllocStencil,  /* 7  AllocStencilBuffer (off 88; Z24S8 = ack) */
     (APTR)hw_AllocZBuffer,  /* 8  AllocZBuffer (base 60, off 92) */
     (APTR)hw_CreateContext, /* 9  CreateContext */
-    (APTR)hw_s10, (APTR)hw_s11, (APTR)hw_s12,
+    (APTR)hw_ClearStencil,  /* 10 ClearStencilBuffer (off 100) */
+    (APTR)hw_s11, (APTR)hw_s12,
     (APTR)hw_s13,           /* 13 (was DrawTriangle: mis-mapped state op) */
-    (APTR)hw_UploadTexture, /* 14 */ (APTR)hw_s15, (APTR)hw_s16,
+    (APTR)hw_UploadTexture, /* 14 */
+    (APTR)hw_DrawLine,      /* 15 DrawLine (off 120) */
+    (APTR)hw_DrawPoint,     /* 16 DrawPoint (off 124) */
     (APTR)hw_DrawTriangle,  /* 17 */ (APTR)hw_s18,
     (APTR)hw_s19,           /* 19 SetState/Query/format-query -> 5 (keep) */
     (APTR)hw_FreeTexObj, /* 20 */ (APTR)hw_s21, (APTR)hw_s22,
@@ -574,7 +618,7 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)hw_SetFogParams, /* 31 SetFogParams (off 184; runtime-confirmed) */
     (APTR)hw_TexWrap,   /* 32 tex wrap (off 0xcc; + SetWrapMode) */
     (APTR)hw_SetColorMask,  /* 33 SetColorMask (suite telemetry) */
-    (APTR)hw_s34,
+    (APTR)hw_SetStencilFunc, /* 34 SetStencilFunc (off 196) */
     (APTR)hw_TexEnv, /* 35 tex env / SetTexEnv (off 0xc8) -- records per-tex mode */
     (APTR)hw_s36, /* 36 (was DrawTriStrip: mis-mapped) */
     (APTR)hw_SetZCompare, /* 37 SetZCompareMode (base 60, off 208) */
@@ -582,7 +626,10 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)hw_s39,
     (APTR)hw_DrawTriStrip, /* 40 */ (APTR)hw_DrawTriFan, /* 41 */ (APTR)hw_s42, (APTR)hw_s43,
     (APTR)hw_LockHW, /* 44 LockHardware (ack) */ (APTR)hw_UnLockHW, /* 45 UnLockHardware (ack) */
-    (APTR)hw_s46, (APTR)hw_s47, (APTR)hw_s48, (APTR)hw_s49, (APTR)hw_s50, (APTR)hw_s51,
+    (APTR)hw_s46,
+    (APTR)hw_SetStencilOp,  /* 47 SetStencilOp (off 248) */
+    (APTR)hw_SetWriteMask,  /* 48 SetWriteMask (off 252) */
+    (APTR)hw_s49, (APTR)hw_s50, (APTR)hw_s51,
     (APTR)hw_s52, (APTR)hw_s53, (APTR)hw_s54, (APTR)hw_s55, (APTR)hw_s56,
     (APTR)hw_s57,           /* 57 identify -> 0x48aa (keep) */
     (APTR)hw_SetDrawRegion, /* 58 SetDrawRegion (ack; GFXdriver does the real lock) */

@@ -375,34 +375,52 @@ static void bind_blend(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
         wv->blend_on ? wv->blend_func_h : wv->blend_opaque_h);
 }
 
-/* Bind the DSA for the current depth + alpha-test state.  Without alpha test
- * the three static objects (300/301/302) cover every depth combination; with
- * it a dynamic object carries depth bits + alpha func + ref (twin-handle
- * recreate only when the effective state actually changed). */
+/* Bind the DSA for the current depth + alpha-test + stencil state.  Without
+ * alpha test or stencil the three static objects (300/301/302) cover every
+ * depth combination; otherwise a dynamic object carries depth bits + alpha
+ * func/ref + the single-face stencil word (twin-handle recreate only when
+ * the effective state actually changed). */
 static void bind_dsa(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
 {
+    BOOL alpha   = (wv->alpha_on && wv->alpha_func);
+    BOOL stencil = wv->stencil_on;
     if (!wv->dsa_handle) return;
-    if (wv->alpha_on && wv->alpha_func) {
+    if (alpha || stencil) {
         uint32 s0 = (wv->depth_test
                        ? (VIRGL_DSA_S0_DEPTH_ENABLE(1) |
                           VIRGL_DSA_S0_DEPTH_WRITEMASK(wv->depth_write ? 1 : 0) |
                           VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_LESS))
                        : (VIRGL_DSA_S0_DEPTH_ENABLE(1) |
-                          VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_ALWAYS)))
-                  | VIRGL_DSA_S0_ALPHA_ENABLE(1)
-                  | VIRGL_DSA_S0_ALPHA_FUNC(wv->alpha_func);
+                          VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_ALWAYS)));
+        uint32 s1 = 0;
+        if (alpha)
+            s0 |= VIRGL_DSA_S0_ALPHA_ENABLE(1)
+                | VIRGL_DSA_S0_ALPHA_FUNC(wv->alpha_func);
+        if (stencil)
+            s1 = VIRGL_DSA_S1_STENCIL_ENABLED(1)
+               | VIRGL_DSA_S1_STENCIL_FUNC(wv->st_func)
+               | VIRGL_DSA_S1_STENCIL_FAIL_OP(wv->st_fail)
+               | VIRGL_DSA_S1_STENCIL_ZPASS_OP(wv->st_zpass)
+               | VIRGL_DSA_S1_STENCIL_ZFAIL_OP(wv->st_zfail)
+               | VIRGL_DSA_S1_STENCIL_VALUEMASK(wv->st_valuemask)
+               | VIRGL_DSA_S1_STENCIL_WRITEMASK(wv->st_writemask);
         if (!wv->dsa_alpha_h || s0 != wv->dsa_alpha_s0 ||
-            wv->alpha_ref != wv->dsa_alpha_ref) {
+            s1 != wv->dsa_alpha_s1 ||
+            (alpha && wv->alpha_ref != wv->dsa_alpha_ref)) {
             uint32 nh = handle_flip(wv->dsa_alpha_h, W3D_HANDLE_DSA_ALPHA,
                                     W3D_HANDLE_DSA_ALPHA + 2);
-            virgl_cmd_create_dsa(cbuf, nh, s0, 0, 0, wv->alpha_ref);
+            /* W3D stencil is single-face: back (S2) mirrors front (S1) */
+            virgl_cmd_create_dsa(cbuf, nh, s0, s1, s1, wv->alpha_ref);
             if (wv->dsa_alpha_h)
                 virgl_cmd_destroy_object(cbuf, VIRGL_OBJECT_DSA, wv->dsa_alpha_h);
             wv->dsa_alpha_h  = nh;
             wv->dsa_alpha_s0 = s0;
+            wv->dsa_alpha_s1 = s1;
             wv->dsa_alpha_ref = wv->alpha_ref;
         }
         virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_DSA, wv->dsa_alpha_h);
+        if (stencil)
+            virgl_cmd_set_stencil_ref(cbuf, wv->st_ref, wv->st_ref);
     } else {
         virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_DSA,
             wv->depth_test ? (wv->depth_write ? 300 : 301) : 302);
@@ -531,15 +549,18 @@ static void bind_rasterizer(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
               | VIRGL_RS_S0_FILL_BACK(PIPE_POLYGON_MODE_FILL)
               | VIRGL_RS_S0_SCISSOR(1)
               | VIRGL_RS_S0_FRONT_CCW(wv->front_ccw ? 1 : 0);
-    if (!wv->rast_h || s0 != wv->rast_s0) {
+    if (!wv->rast_h || s0 != wv->rast_s0 ||
+        wv->point_size != wv->rast_psize || wv->line_width != wv->rast_lwidth) {
         uint32 nh = handle_flip(wv->rast_h, W3D_HANDLE_RAST,
                                 W3D_HANDLE_RAST + 2);
-        virgl_cmd_create_rasterizer(cbuf, nh, s0, 1.0f, 0, 0,
-                                    1.0f, 0.0f, 0.0f, 0.0f);
+        virgl_cmd_create_rasterizer(cbuf, nh, s0, wv->point_size, 0, 0,
+                                    wv->line_width, 0.0f, 0.0f, 0.0f);
         if (wv->rast_h)
             virgl_cmd_destroy_object(cbuf, VIRGL_OBJECT_RASTERIZER, wv->rast_h);
         wv->rast_h  = nh;
         wv->rast_s0 = s0;
+        wv->rast_psize  = wv->point_size;
+        wv->rast_lwidth = wv->line_width;
     }
     virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_RASTERIZER, wv->rast_h);
 }
@@ -811,6 +832,13 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
         wv->fog_on = FALSE; wv->fog_mode = 0;
         wv->fog_start = 0.0f; wv->fog_end = 1.0f; wv->fog_density = 1.0f;
         wv->fog_color[0] = wv->fog_color[1] = wv->fog_color[2] = 0.0f;
+        wv->stencil_on = FALSE;
+        wv->st_func = PIPE_FUNC_ALWAYS; wv->st_ref = 0;
+        wv->st_valuemask = 0xFF; wv->st_writemask = 0xFF;
+        wv->st_fail = wv->st_zfail = wv->st_zpass = PIPE_STENCIL_OP_KEEP;
+        wv->dsa_alpha_s1 = 0;
+        wv->point_size = 1.0f; wv->line_width = 1.0f;
+        wv->rast_psize = 0.0f; wv->rast_lwidth = 0.0f;
         virgl_cmd_init(&bcb, bw2, 64);
         virgl_cmd_create_blend(&bcb, W3D_HANDLE_BLEND_OPAQUE, 0, VIRGL_BLEND_RT_OPAQUE);
         virgl_cmd_create_blend(&bcb, W3D_HANDLE_BLEND_FUNC, 0,
@@ -1124,6 +1152,121 @@ uint32 w3d_SetFogParams(W3D_Context *ctx, W3D_Fog *params, uint32 mode)
     }
     DW3D("SetFogParams: mode=%lu\n", (unsigned long)mode);
     return W3D_SUCCESS;
+}
+
+/* W3D_ST_* compare funcs (1..8) -> PIPE_FUNC.  Note the W3D docs phrase the
+ * comparison as "draw if refvalue FUNC stored" -- same operand order as GL. */
+static uint32 w3d_stfunc(uint32 f)
+{
+    switch (f) {
+    case W3D_ST_NEVER:    return PIPE_FUNC_NEVER;
+    case W3D_ST_ALWAYS:   return PIPE_FUNC_ALWAYS;
+    case W3D_ST_LESS:     return PIPE_FUNC_LESS;
+    case W3D_ST_LEQUAL:   return PIPE_FUNC_LEQUAL;
+    case W3D_ST_EQUAL:    return PIPE_FUNC_EQUAL;
+    case W3D_ST_GEQUAL:   return PIPE_FUNC_GEQUAL;
+    case W3D_ST_GREATER:  return PIPE_FUNC_GREATER;
+    case W3D_ST_NOTEQUAL: return PIPE_FUNC_NOTEQUAL;
+    default:              return PIPE_FUNC_ALWAYS;
+    }
+}
+static uint32 w3d_stop(uint32 op)
+{
+    switch (op) {
+    case W3D_ST_KEEP:      return PIPE_STENCIL_OP_KEEP;
+    case W3D_ST_ZERO:      return PIPE_STENCIL_OP_ZERO;
+    case W3D_ST_REPLACE:   return PIPE_STENCIL_OP_REPLACE;
+    case W3D_ST_INCR:      return PIPE_STENCIL_OP_INCR;
+    case W3D_ST_DECR:      return PIPE_STENCIL_OP_DECR;
+    case W3D_ST_INVERT:    return PIPE_STENCIL_OP_INVERT;
+    case W3D_ST_INCR_WRAP: return PIPE_STENCIL_OP_INCR_WRAP;
+    case W3D_ST_DECR_WRAP: return PIPE_STENCIL_OP_DECR_WRAP;
+    default:               return PIPE_STENCIL_OP_KEEP;
+    }
+}
+
+uint32 w3d_SetStencilFunc(W3D_Context *ctx, uint32 func, uint32 refvalue, uint32 mask)
+{
+    struct W3DVirgl *wv;
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    wv->st_func = w3d_stfunc(func);
+    wv->st_ref  = refvalue & 0xFF;
+    wv->st_valuemask = mask & 0xFF;
+    DW3D("SetStencilFunc: func=%lu ref=%lu mask=%lx\n", (unsigned long)func,
+         (unsigned long)refvalue, (unsigned long)mask);
+    return W3D_SUCCESS;
+}
+
+uint32 w3d_SetStencilOp(W3D_Context *ctx, uint32 sfail, uint32 dpfail, uint32 dppass)
+{
+    struct W3DVirgl *wv;
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    wv->st_fail  = w3d_stop(sfail);
+    wv->st_zfail = w3d_stop(dpfail);
+    wv->st_zpass = w3d_stop(dppass);
+    DW3D("SetStencilOp: %lu/%lu/%lu\n", (unsigned long)sfail,
+         (unsigned long)dpfail, (unsigned long)dppass);
+    return W3D_SUCCESS;
+}
+
+uint32 w3d_SetStencilWriteMask(W3D_Context *ctx, uint32 mask)
+{
+    struct W3DVirgl *wv;
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    wv->st_writemask = mask & 0xFF;
+    return W3D_SUCCESS;
+}
+
+/* Stencil-only clear (the stencil plane lives in the Z24S8 depth buffer;
+ * colour/depth clears deliberately DON'T touch it). */
+uint32 w3d_ClearStencil(W3D_Context *ctx, uint32 *clearval)
+{
+    struct W3DVirgl *wv;
+    uint32 cw[64];
+    struct VirglCmdBuf cb;
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    virgl_cmd_init(&cb, cw, 64);
+    bind_rt_framebuffer(&cb, wv);
+    virgl_cmd_clear(&cb, PIPE_CLEAR_STENCIL, 0.0f, 0.0f, 0.0f, 0.0f, 1.0,
+                    clearval ? *clearval : 0);
+    if (!cb.overflowed)
+        g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id, cb.buf, cb.dwords);
+    DW3D("ClearStencil: val=%lu\n",
+         (unsigned long)(clearval ? *clearval : 0));
+    return W3D_SUCCESS;
+}
+
+/* Immediate point/line ops -- width/size are per-primitive in W3D and baked
+ * into the rasterizer object (rebuilt only when the value changes). */
+uint32 w3d_DrawPoint(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Point *point)
+{
+    struct W3DVirgl *wv;
+    float verts[8];
+    (void)Self;
+    if (!ctx || !ctx->driver || !point) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    wv->point_size = (point->pointsize > 0.0f) ? (float)point->pointsize : 1.0f;
+    if (point->tex) w3d_BindTexture((struct Warp3DIFace *)0, ctx, 0, point->tex);
+    pack_vertex(verts, &point->v1, (float)wv->fb_w, (float)wv->fb_h);
+    return draw_packed(wv, verts, 1, PIPE_PRIM_POINTS);
+}
+
+uint32 w3d_DrawLine(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Line *line)
+{
+    struct W3DVirgl *wv;
+    float verts[16];
+    (void)Self;
+    if (!ctx || !ctx->driver || !line) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    wv->line_width = (line->linewidth > 0.0f) ? (float)line->linewidth : 1.0f;
+    if (line->tex) w3d_BindTexture((struct Warp3DIFace *)0, ctx, 0, line->tex);
+    pack_vertex(&verts[0], &line->v1, (float)wv->fb_w, (float)wv->fb_h);
+    pack_vertex(&verts[8], &line->v2, (float)wv->fb_w, (float)wv->fb_h);
+    return draw_packed(wv, verts, 2, PIPE_PRIM_LINES);
 }
 
 uint32 w3d_SetTexWrap(W3D_Context *ctx, W3D_Texture *tex,
@@ -1445,6 +1588,103 @@ uint32 w3d_BindTexture(struct Warp3DIFace *Self, W3D_Context *ctx,
     return W3D_SUCCESS;
 }
 
+/* Convert a W3D texture image to the R8G8B8A8 the upload path speaks.
+ * Returns the buffer to upload; *scratch is an AllocVec the CALLER frees
+ * (NULL when the source was already R8G8B8A8 and used directly).
+ * Unsupported formats return NULL (logged; texture creation fails cleanly).
+ * 16-bit formats are read as native big-endian words (PPC texture data). */
+static APTR tex_to_rgba(APTR image, uint32 w, uint32 h, uint32 fmt, APTR *scratch)
+{
+    uint32 n = w * h, i;
+    UBYTE *dst;
+    *scratch = NULL;
+    if (fmt == W3D_R8G8B8A8 || fmt == 0)
+        return image;                      /* native, upload as-is */
+    dst = IExec->AllocVecTags(n * 4, AVT_Type, MEMF_PRIVATE, TAG_DONE);
+    if (!dst) return NULL;
+    switch (fmt) {
+    case W3D_A8R8G8B8: {
+        const UBYTE *s = image;
+        for (i = 0; i < n; i++) {
+            dst[i*4+0] = s[i*4+1]; dst[i*4+1] = s[i*4+2];
+            dst[i*4+2] = s[i*4+3]; dst[i*4+3] = s[i*4+0];
+        }
+        break;
+    }
+    case W3D_R8G8B8: {
+        const UBYTE *s = image;
+        for (i = 0; i < n; i++) {
+            dst[i*4+0] = s[i*3+0]; dst[i*4+1] = s[i*3+1];
+            dst[i*4+2] = s[i*3+2]; dst[i*4+3] = 0xFF;
+        }
+        break;
+    }
+    case W3D_R5G6B5: {
+        const UWORD *s = image;
+        for (i = 0; i < n; i++) {
+            UWORD p = s[i];
+            dst[i*4+0] = (UBYTE)(((p >> 11) & 0x1F) * 255 / 31);
+            dst[i*4+1] = (UBYTE)(((p >>  5) & 0x3F) * 255 / 63);
+            dst[i*4+2] = (UBYTE)(( p        & 0x1F) * 255 / 31);
+            dst[i*4+3] = 0xFF;
+        }
+        break;
+    }
+    case W3D_A1R5G5B5: {
+        const UWORD *s = image;
+        for (i = 0; i < n; i++) {
+            UWORD p = s[i];
+            dst[i*4+0] = (UBYTE)(((p >> 10) & 0x1F) * 255 / 31);
+            dst[i*4+1] = (UBYTE)(((p >>  5) & 0x1F) * 255 / 31);
+            dst[i*4+2] = (UBYTE)(( p        & 0x1F) * 255 / 31);
+            dst[i*4+3] = (p & 0x8000) ? 0xFF : 0x00;
+        }
+        break;
+    }
+    case W3D_A4R4G4B4: {
+        const UWORD *s = image;
+        for (i = 0; i < n; i++) {
+            UWORD p = s[i];
+            dst[i*4+0] = (UBYTE)(((p >> 8) & 0xF) * 17);
+            dst[i*4+1] = (UBYTE)(((p >> 4) & 0xF) * 17);
+            dst[i*4+2] = (UBYTE)(( p       & 0xF) * 17);
+            dst[i*4+3] = (UBYTE)(((p >>12) & 0xF) * 17);
+        }
+        break;
+    }
+    case W3D_L8: case W3D_I8: {
+        const UBYTE *s = image;
+        for (i = 0; i < n; i++) {
+            dst[i*4+0] = dst[i*4+1] = dst[i*4+2] = s[i];
+            dst[i*4+3] = 0xFF;
+        }
+        break;
+    }
+    case W3D_A8: {
+        const UBYTE *s = image;
+        for (i = 0; i < n; i++) {
+            dst[i*4+0] = dst[i*4+1] = dst[i*4+2] = 0xFF;
+            dst[i*4+3] = s[i];
+        }
+        break;
+    }
+    case W3D_L8A8: {
+        const UBYTE *s = image;
+        for (i = 0; i < n; i++) {
+            dst[i*4+0] = dst[i*4+1] = dst[i*4+2] = s[i*2+0];
+            dst[i*4+3] = s[i*2+1];
+        }
+        break;
+    }
+    default:
+        DW3D("tex_to_rgba: format %lu UNSUPPORTED\n", (unsigned long)fmt);
+        IExec->FreeVec(dst);
+        return NULL;
+    }
+    *scratch = dst;
+    return dst;
+}
+
 /* Realize a FE-built W3D_Texture.  The stock Warp3D.library FE allocates+fills
  * the W3D_Texture itself (parses the ATO tags into texsource/texwidth/texheight)
  * then calls the backend's off-0xd4 slot to UPLOAD it -- it never calls a tag-
@@ -1474,13 +1714,20 @@ uint32 w3d_RealizeTexture(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Textur
                              AVT_Type, MEMF_PRIVATE, AVT_ClearWithValue, 0, TAG_DONE);
     if (!ti) return W3D_NOMEMORY;
 
-    /* Cow textures are 32bpp RGBA RAW -> R8G8B8A8 (chip GP32 swap handles BE/LE). */
-    if (!g_IV3D->CreateTexture(g_IV3D, wv->info.token, w, h, image, w * 4,
-                               &ti->view, &ti->res)) {
-        DW3D("RealizeTexture: CreateTexture failed %lux%lu\n",
-             (unsigned long)w, (unsigned long)h);
-        IExec->FreeVec(ti);
-        return W3D_NOMEMORY;
+    /* Upload as R8G8B8A8; other W3D_ATO_FORMATs (texfmtsrc) are CPU-converted
+     * at upload time (scratch freed below -- CreateTexture copies). */
+    {
+        APTR scratch = NULL;
+        APTR up = tex_to_rgba(image, w, h, (uint32)tex->texfmtsrc, &scratch);
+        BOOL ok = up && g_IV3D->CreateTexture(g_IV3D, wv->info.token, w, h,
+                                              up, w * 4, &ti->view, &ti->res);
+        if (scratch) IExec->FreeVec(scratch);
+        if (!ok) {
+            DW3D("RealizeTexture: CreateTexture failed %lux%lu fmt=%ld\n",
+                 (unsigned long)w, (unsigned long)h, (long)tex->texfmtsrc);
+            IExec->FreeVec(ti);
+            return W3D_NOMEMORY;
+        }
     }
     ti->w = w; ti->h = h;
     ti->magic = W3DTEX_MAGIC;
@@ -1721,6 +1968,7 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
         wv->blend_on    = (fe & W3D_BLENDING)      != 0;
         wv->alpha_on    = (fe & W3D_ALPHATEST)     != 0;
         wv->cull_on     = (fe & W3D_CULLFACE)      != 0;
+        wv->stencil_on  = (fe & W3D_STENCILBUFFER) != 0;
         /* W3D_SetFrontFace never reaches the backend -- the FE records it in
          * the public ctx->FrontFaceOrder (V4 field), like texenv.  INVERTED
          * into GL terms: our pipeline rasterizes with an effective y-flip

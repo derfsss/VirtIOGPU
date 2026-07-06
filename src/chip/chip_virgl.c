@@ -761,6 +761,13 @@ void virgl_setup_repfog_fs(struct VirglCmdBuf *cbuf, uint32 handle)
     virgl_cmd_create_shader(cbuf, handle, PIPE_SHADER_FRAGMENT, tgsi_fs_repfog);
 }
 
+/* SET_STENCIL_REF -- payload 1 dword: front ref | (back ref << 8) */
+void virgl_cmd_set_stencil_ref(struct VirglCmdBuf *cbuf, uint32 front, uint32 back)
+{
+    virgl_emit_dword(cbuf, VIRGL_CMD_HDR(VIRGL_CCMD_SET_STENCIL_REF, 0, 1));
+    virgl_emit_dword(cbuf, (front & 0xFF) | ((back & 0xFF) << 8));
+}
+
 /* SET_CONSTANT_BUFFER -- upload float constants to a shader stage's CONST file.
  * Payload: shader_type, index(0=default uniform block -> CONST[0..]), float words. */
 void virgl_cmd_set_constant_buffer(struct VirglCmdBuf *cbuf, uint32 shader_type,

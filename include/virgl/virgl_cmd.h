@@ -81,12 +81,22 @@ struct ChipGPUState;
 #define PIPE_FORMAT_B4G4R4A4_UNORM          6
 #define PIPE_FORMAT_B5G6R5_UNORM            7
 #define PIPE_FORMAT_R10G10B10A2_UNORM       8
-#define PIPE_FORMAT_Z16_UNORM               11
-#define PIPE_FORMAT_Z32_UNORM               12
-#define PIPE_FORMAT_Z32_FLOAT               13
-#define PIPE_FORMAT_Z24_UNORM_S8_UINT       14
-#define PIPE_FORMAT_Z24X8_UNORM             16
-#define PIPE_FORMAT_S8_UINT                 18
+/* Depth/stencil block CORRECTED to the official gallium/virgl enum
+ * (2026-07-06): the old hand-built values were shifted -- "Z24X8=16" was
+ * really Z16_UNORM (a working depth-only format, which is why it never
+ * failed), and "Z24S8=14" was UYVY (vrend: Illegal resource).  Verified
+ * against the working ids elsewhere in this table (28..31, 64, 67). */
+#define PIPE_FORMAT_L8_UNORM                 9
+#define PIPE_FORMAT_A8_UNORM                10
+#define PIPE_FORMAT_I8_UNORM                11
+#define PIPE_FORMAT_L8A8_UNORM              12
+#define PIPE_FORMAT_Z16_UNORM               16
+#define PIPE_FORMAT_Z32_UNORM               17
+#define PIPE_FORMAT_Z32_FLOAT               18
+#define PIPE_FORMAT_Z24_UNORM_S8_UINT       19
+#define PIPE_FORMAT_S8_UINT_Z24_UNORM       20
+#define PIPE_FORMAT_Z24X8_UNORM             21
+#define PIPE_FORMAT_S8_UINT                 23
 #define PIPE_FORMAT_R32_FLOAT               28
 #define PIPE_FORMAT_R32G32_FLOAT            29
 #define PIPE_FORMAT_R32G32B32_FLOAT         30
@@ -230,6 +240,25 @@ struct ChipGPUState;
 #define VIRGL_DSA_S0_DEPTH_FUNC(x)      (((x) & 0x7) << 2)
 #define VIRGL_DSA_S0_ALPHA_ENABLE(x)    (((x) & 0x1) << 8)
 #define VIRGL_DSA_S0_ALPHA_FUNC(x)      (((x) & 0x7) << 9)
+
+/* DSA S1/S2 = per-face stencil state (front/back) */
+#define VIRGL_DSA_S1_STENCIL_ENABLED(x)   ((x) & 0x1)
+#define VIRGL_DSA_S1_STENCIL_FUNC(x)      (((x) & 0x7) << 1)
+#define VIRGL_DSA_S1_STENCIL_FAIL_OP(x)   (((x) & 0x7) << 4)
+#define VIRGL_DSA_S1_STENCIL_ZPASS_OP(x)  (((x) & 0x7) << 7)
+#define VIRGL_DSA_S1_STENCIL_ZFAIL_OP(x)  (((x) & 0x7) << 10)
+#define VIRGL_DSA_S1_STENCIL_VALUEMASK(x) (((x) & 0xff) << 13)
+#define VIRGL_DSA_S1_STENCIL_WRITEMASK(x) (((x) & 0xff) << 21)
+
+/* PIPE_STENCIL_OP */
+#define PIPE_STENCIL_OP_KEEP       0
+#define PIPE_STENCIL_OP_ZERO       1
+#define PIPE_STENCIL_OP_REPLACE    2
+#define PIPE_STENCIL_OP_INCR       3
+#define PIPE_STENCIL_OP_DECR       4
+#define PIPE_STENCIL_OP_INCR_WRAP  5
+#define PIPE_STENCIL_OP_DECR_WRAP  6
+#define PIPE_STENCIL_OP_INVERT     7
 
 /* -----------------------------------------------------------------------
  * Rasterizer S0/S3 encoding -- matches virglrenderer vrend_decode.c layout.
@@ -503,6 +532,7 @@ void virgl_setup_blend_fs(struct VirglCmdBuf *cbuf, uint32 handle);
 void virgl_setup_repfog_fs(struct VirglCmdBuf *cbuf, uint32 handle);
 void virgl_cmd_set_constant_buffer(struct VirglCmdBuf *cbuf, uint32 shader_type,
                                    uint32 index, const float *data, uint32 nfloats);
+void virgl_cmd_set_stencil_ref(struct VirglCmdBuf *cbuf, uint32 front, uint32 back);
 
 /* Sampler state + view */
 void virgl_cmd_create_sampler_state(struct VirglCmdBuf *cbuf, uint32 handle,

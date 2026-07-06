@@ -143,6 +143,19 @@ struct W3DVirgl {
     uint32 fog_mode;                /* W3D_FOG_LINEAR/EXP/EXP_2/INTERPOLATED */
     float  fog_start, fog_end, fog_density;
     float  fog_color[3];
+    /* stencil (W3D_SetStencilFunc/Op/WriteMask; enabled by the
+     * W3D_STENCILBUFFER mirror bit; buffer = the Z24S8 depth buffer).
+     * Baked into the dynamic DSA (single-face: front == back). */
+    BOOL   stencil_on;              /* fe mirror, per draw */
+    uint32 st_func;                 /* PIPE_FUNC_*, default ALWAYS */
+    uint32 st_ref;                  /* reference value (SET_STENCIL_REF) */
+    uint32 st_valuemask, st_writemask;
+    uint32 st_fail, st_zfail, st_zpass;  /* PIPE_STENCIL_OP_* */
+    uint32 dsa_alpha_s1;            /* stencil word the live DSA was built with */
+    /* point sizes / line widths (W3D_DrawPoint/W3D_DrawLine immediates) --
+     * baked into the W3D rasterizer object */
+    float  point_size, line_width;
+    float  rast_psize, rast_lwidth; /* values the live rasterizer carries */
 
     /* bound vertex arrays (W3D_VertexPointer / W3D_ColorPointer) */
     const UBYTE *vtx_ptr;  int vtx_stride;  uint32 vtx_mode;
@@ -216,6 +229,12 @@ uint32       w3d_SetFrontFace(struct Warp3DIFace *Self, W3D_Context *ctx, uint32
 uint32       w3d_SetTexFilter(W3D_Context *ctx, W3D_Texture *tex, uint32 fmin, uint32 fmag);
 uint32       w3d_SetTexWrap(W3D_Context *ctx, W3D_Texture *tex, uint32 mode_s, uint32 mode_t, W3D_Color *border);
 uint32       w3d_SetFogParams(W3D_Context *ctx, W3D_Fog *params, uint32 mode);
+uint32       w3d_SetStencilFunc(W3D_Context *ctx, uint32 func, uint32 refvalue, uint32 mask);
+uint32       w3d_SetStencilOp(W3D_Context *ctx, uint32 sfail, uint32 dpfail, uint32 dppass);
+uint32       w3d_SetStencilWriteMask(W3D_Context *ctx, uint32 mask);
+uint32       w3d_ClearStencil(W3D_Context *ctx, uint32 *clearval);
+uint32       w3d_DrawPoint(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Point *point);
+uint32       w3d_DrawLine(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Line *line);
 uint32       w3d_SetDrawRegion(struct Warp3DIFace *Self, W3D_Context *ctx, struct BitMap *bm, int yoff, W3D_Scissor *sc);
 uint32       w3d_DrawTriangle(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Triangle *tri);
 uint32       w3d_DrawTriangleV(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_TriangleV *t);

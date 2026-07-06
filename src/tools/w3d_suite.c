@@ -95,10 +95,10 @@ static BOOL read_rgb(int x, int y, int *r, int *g, int *b)
     return TRUE;
 }
 
-static void check_rgb(const char *name, int er, int eg, int eb)
+static void check_rgb_at(const char *name, int x, int y, int er, int eg, int eb)
 {
     int r = -1, g = -1, b = -1;
-    BOOL okread = read_rgb(RT_W / 2, RT_H / 2, &r, &g, &b);
+    BOOL okread = read_rgb(x, y, &r, &g, &b);
     BOOL pass = okread &&
         (r >= er - TOL && r <= er + TOL) &&
         (g >= eg - TOL && g <= eg + TOL) &&
@@ -112,6 +112,11 @@ static void check_rgb(const char *name, int er, int eg, int eb)
         printf("%s\n", line);
         IExec->DebugPrintF("[w3d_suite] %s\n", line);
     }
+}
+
+static void check_rgb(const char *name, int er, int eg, int eb)
+{
+    check_rgb_at(name, RT_W / 2, RT_H / 2, er, eg, eb);
 }
 
 /* ---- draw helpers ------------------------------------------------------ */
@@ -611,6 +616,109 @@ int main(void)
         present();
         check_rgb("separate arrays: textured (TexCoordPointer)", 0, 0, 255);
         IW3D->W3D_BindTexture(g_ctx, 0, NULL);
+    }
+
+    /* 26/27: line width + point size (immediate W3D_DrawLine/W3D_DrawPoint) */
+    {
+        W3D_Line  ln;
+        W3D_Point pt;
+        memset(&ln, 0, sizeof(ln));
+        ln.v1.x = 0.0f;         ln.v1.y = (float)(RT_H / 2); ln.v1.w = 1.0f;
+        ln.v2.x = (float)RT_W;  ln.v2.y = (float)(RT_H / 2); ln.v2.w = 1.0f;
+        ln.v1.color.r = ln.v1.color.g = ln.v1.color.b = ln.v1.color.a = 1.0f;
+        ln.v2.color = ln.v1.color;
+        ln.linewidth = 5.0f;
+        IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+        rc = IW3D->W3D_DrawLine(g_ctx, &ln);
+        NOTE("DrawLine(width 5) rc=%lu", (unsigned long)rc);
+        present();
+        check_rgb_at("line width 5 covers centre+2 rows",
+                     RT_W / 2, RT_H / 2 + 2, 255, 255, 255);
+
+        memset(&pt, 0, sizeof(pt));
+        pt.v1.x = (float)(RT_W / 2); pt.v1.y = (float)(RT_H / 2); pt.v1.w = 1.0f;
+        pt.v1.color.r = 0.0f; pt.v1.color.g = 1.0f;
+        pt.v1.color.b = 0.0f; pt.v1.color.a = 1.0f;
+        pt.pointsize = 9.0f;
+        IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+        rc = IW3D->W3D_DrawPoint(g_ctx, &pt);
+        NOTE("DrawPoint(size 9) rc=%lu", (unsigned long)rc);
+        present();
+        check_rgb_at("point size 9 covers centre+3 px",
+                     RT_W / 2 + 3, RT_H / 2, 0, 255, 0);
+    }
+
+    /* 28/29: stencil -- write 1s into the left half, then draw a full-screen
+     * quad gated on stencil EQUAL 1: only the left half turns green */
+    rc = IW3D->W3D_AllocStencilBuffer(g_ctx);
+    NOTE("AllocStencilBuffer rc=%lu", (unsigned long)rc);
+    {
+        uint32 zero = 0;
+        IW3D->W3D_ClearStencilBuffer(g_ctx, &zero);
+    }
+    IW3D->W3D_SetState(g_ctx, W3D_STENCILBUFFER, W3D_ENABLE);
+    rc = IW3D->W3D_SetStencilFunc(g_ctx, W3D_ST_ALWAYS, 1, 0xFF);
+    NOTE("SetStencilFunc(ALWAYS,1) rc=%lu", (unsigned long)rc);
+    IW3D->W3D_SetStencilOp(g_ctx, W3D_ST_KEEP, W3D_ST_KEEP, W3D_ST_REPLACE);
+    IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+    draw_quad(0, 0, (float)(RT_W / 2), (float)RT_H, 0.5f,
+              1.0f, 0.0f, 0.0f, 1.0f);              /* left half: stencil=1 */
+    present();
+    IW3D->W3D_SetStencilFunc(g_ctx, W3D_ST_EQUAL, 1, 0xFF);
+    IW3D->W3D_SetStencilOp(g_ctx, W3D_ST_KEEP, W3D_ST_KEEP, W3D_ST_KEEP);
+    IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);   /* colour+depth only */
+    draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.5f,
+              0.0f, 1.0f, 0.0f, 1.0f);              /* full green, gated */
+    present();
+    check_rgb_at("stencil EQUAL passes written half",
+                 RT_W / 4, RT_H / 2, 0, 255, 0);
+    check_rgb_at("stencil EQUAL blocks unwritten half",
+                 (RT_W * 3) / 4, RT_H / 2, 0, 0, 0);
+    IW3D->W3D_SetState(g_ctx, W3D_STENCILBUFFER, W3D_DISABLE);
+
+    /* 30/31: texture format conversion at upload (R5G6B5, A8R8G8B8) */
+    {
+        uint32 err = 0;
+        W3D_Texture *t565, *targb;
+        UWORD *p16 = (UWORD *)tex_pixels;
+        UBYTE *p8  = (UBYTE *)tex_pixels;
+        int i;
+        for (i = 0; i < TEX_W * TEX_H; i++)
+            p16[i] = (UWORD)(0x1F << 11);           /* pure red 565 */
+        t565 = IW3D->W3D_AllocTexObjTags(g_ctx, &err,
+                   W3D_ATO_IMAGE, tex_pixels, W3D_ATO_FORMAT, W3D_R5G6B5,
+                   W3D_ATO_WIDTH, TEX_W, W3D_ATO_HEIGHT, TEX_H, TAG_DONE);
+        NOTE("AllocTexObjTags(R5G6B5) tex=%p err=%lu", (void *)t565,
+             (unsigned long)err);
+        if (t565) {
+            IW3D->W3D_BindTexture(g_ctx, 0, t565);
+            IW3D->W3D_SetTexEnv(g_ctx, t565, W3D_REPLACE, NULL);
+            IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+            draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.5f, 1, 1, 1, 1);
+            present();
+            check_rgb("texfmt R5G6B5 red", 255, 0, 0);
+            IW3D->W3D_BindTexture(g_ctx, 0, NULL);
+            IW3D->W3D_FreeTexObj(g_ctx, t565);
+        } else g_fails++;
+        for (i = 0; i < TEX_W * TEX_H; i++) {
+            p8[i*4+0] = 0xFF; p8[i*4+1] = 0x00;     /* A,R,G,B = green */
+            p8[i*4+2] = 0xFF; p8[i*4+3] = 0x00;
+        }
+        targb = IW3D->W3D_AllocTexObjTags(g_ctx, &err,
+                   W3D_ATO_IMAGE, tex_pixels, W3D_ATO_FORMAT, W3D_A8R8G8B8,
+                   W3D_ATO_WIDTH, TEX_W, W3D_ATO_HEIGHT, TEX_H, TAG_DONE);
+        NOTE("AllocTexObjTags(A8R8G8B8) tex=%p err=%lu", (void *)targb,
+             (unsigned long)err);
+        if (targb) {
+            IW3D->W3D_BindTexture(g_ctx, 0, targb);
+            IW3D->W3D_SetTexEnv(g_ctx, targb, W3D_REPLACE, NULL);
+            IW3D->W3D_ClearDrawRegion(g_ctx, 0xFF000000);
+            draw_quad(0, 0, (float)RT_W, (float)RT_H, 0.5f, 1, 1, 1, 1);
+            present();
+            check_rgb("texfmt A8R8G8B8 green", 0, 255, 0);
+            IW3D->W3D_BindTexture(g_ctx, 0, NULL);
+            IW3D->W3D_FreeTexObj(g_ctx, targb);
+        } else g_fails++;
     }
 
     /* --- 8b telemetry: what does the FE claim for the not-yet-done set? --- */

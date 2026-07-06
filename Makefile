@@ -13,7 +13,7 @@
 # races: clean deletes the build dir while compilation is running.)
 #
 # Targets:
-#   make all       — chip driver, minigl stub, helper tools (default)
+#   make all       — chip driver + helper tools (default)
 #   make dist      — stage the Installation Utility drawer in build/dist/
 #   make dist-lha  — pack the staged drawer into build/VirtIOGPU.lha
 #   make clean     — remove build/
@@ -37,18 +37,12 @@ CHIP_CFLAGS += -DGPU_SHIM_CONTRACT
 endif
 CHIP_LDFLAGS = -mcrt=newlib -nostartfiles
 
-# MiniGL stub library uses the same flags as the chip
-MGL_CFLAGS   = -O2 -Wall -I./include -fno-tree-loop-distribute-patterns \
-               -mcrt=newlib -D__NOLIBBASE__ -D__NOGLOBALIFACE__ $(DEPFLAGS)
-MGL_LDFLAGS  = -mcrt=newlib -nostartfiles
-
 # Docker image used to run lha when it is not on the host PATH
 DOCKER_IMAGE ?= walkero/amigagccondocker:os4-gcc11
 DOCKER_RUN    = docker run --rm -v "$(CURDIR):/work" -w /work $(DOCKER_IMAGE)
 
 BUILD_DIR   = build
 CHIP_TARGET = $(BUILD_DIR)/virtiogpu.chip
-MGL_TARGET  = $(BUILD_DIR)/minigl.library
 COMP_TARGET = $(BUILD_DIR)/test_composite
 INFO_TARGET = $(BUILD_DIR)/virtiogpu_info
 GPUVTEST_TARGET = $(BUILD_DIR)/gpu_vtest
@@ -81,9 +75,6 @@ CHIP_SRC     = src/chip/chip_lib.c \
 CHIP_OBJ     = $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(CHIP_SRC))
 CHIP_VQ_OBJ  = $(BUILD_DIR)/chip/virtqueue_chip.o
 
-MGL_SRC      = src/minigl/minigl_lib.c
-MGL_OBJ      = $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(MGL_SRC))
-
 # -----------------------------------------------------------------------
 # warp3d.library (GPL) -- Warp3D V5 API over the chip's "v3d" transport.
 # Reuses src/chip/chip_virgl.c compiled with -DVIRGL_ENCODE_ONLY (chip-free
@@ -111,11 +102,11 @@ W3DVIO_OBJ     = $(BUILD_DIR)/w3d_virtio/w3d_virtio_lib.o \
                  $(BUILD_DIR)/w3d_virtio/warp3d_main.o \
                  $(BUILD_DIR)/w3d_virtio/virgl_encode.o
 
-DEP = $(CHIP_OBJ:.o=.d) $(CHIP_VQ_OBJ:.o=.d) $(MGL_OBJ:.o=.d) $(W3D_OBJ:.o=.d) $(W3DVIO_OBJ:.o=.d)
+DEP = $(CHIP_OBJ:.o=.d) $(CHIP_VQ_OBJ:.o=.d) $(W3D_OBJ:.o=.d) $(W3DVIO_OBJ:.o=.d)
 
 .PHONY: all clean dist dist-lha help
 
-all: $(CHIP_TARGET) $(MGL_TARGET) $(W3D_TARGET) $(W3DVIO_TARGET) $(COMP_TARGET) $(INFO_TARGET) $(W3DTRI_TARGET) $(GPUVTEST_TARGET)
+all: $(CHIP_TARGET) $(W3D_TARGET) $(W3DVIO_TARGET) $(COMP_TARGET) $(INFO_TARGET) $(W3DTRI_TARGET) $(GPUVTEST_TARGET)
 
 $(W3DVIO_TARGET): $(W3DVIO_OBJ)
 	$(CC) $(W3DVIO_OBJ) -o $(W3DVIO_TARGET) $(W3DVIO_LDFLAGS)
@@ -153,9 +144,6 @@ $(BUILD_DIR)/chip/virtqueue_chip.o: src/virtio/virtqueue.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CHIP_CFLAGS) -c $< -o $@
 
-$(MGL_TARGET): $(MGL_OBJ)
-	$(CC) $(MGL_OBJ) -o $(MGL_TARGET) $(MGL_LDFLAGS)
-
 $(W3D_TARGET): $(W3D_OBJ)
 	$(CC) $(W3D_OBJ) -o $(W3D_TARGET) $(W3D_LDFLAGS)
 
@@ -166,10 +154,6 @@ $(BUILD_DIR)/warp3d/%.o: src/warp3d/%.c
 $(BUILD_DIR)/warp3d/virgl_encode.o: src/chip/chip_virgl.c
 	@mkdir -p $(dir $@)
 	$(CC) $(W3D_CFLAGS) -DVIRGL_ENCODE_ONLY -c $< -o $@
-
-$(BUILD_DIR)/minigl/%.o: src/minigl/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(MGL_CFLAGS) -c $< -o $@
 
 $(COMP_TARGET): src/tools/test_composite.c
 	@mkdir -p $(BUILD_DIR)
@@ -238,7 +222,7 @@ dist-lha: dist
 help:
 	@echo "virtiogpu.chip build system"
 	@echo ""
-	@echo "  make all       - chip driver, minigl stub, helper tools (default)"
+	@echo "  make all       - chip driver + helper tools (default)"
 	@echo "  make dist      - stage Installation Utility drawer in $(DIST_DIR)/"
 	@echo "  make dist-lha  - pack the drawer into $(DIST_LHA)"
 	@echo "  make clean     - remove $(BUILD_DIR)/"

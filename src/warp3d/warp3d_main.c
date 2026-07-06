@@ -570,6 +570,8 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
     }
     wv->draw_idx = 0;               /* draw into buffer 0 first */
     wv->drawn_since_clear = FALSE;
+    wv->texenv_mode = W3D_REPLACE;   /* REPLACE = the current 2-attr path (R8) */
+    wv->texenv_mode_logged = 0;      /* force one census line on first draw */
 
     /* Shared depth buffer + a depth-test DSA (LESS, write enabled) so the cow
      * surfaces occlude correctly regardless of triangle draw order. */
@@ -1182,11 +1184,19 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
     struct VirglCmdBuf cbuf;
     struct VirglVertexBuffer vb;
     float fbw = (float)wv->fb_w, fbh = (float)wv->fb_h;
-    uint32 num_floats = nverts * 8;
-    uint32 i;
+    uint32 i, num_floats;
     /* Textured draw if a texture is bound and the array carries texcoords. */
     struct W3DTexInfo *ti = (wv->cur_tex && wv->cur_tex->driver && wv->ia_has_tcoord)
                             ? (struct W3DTexInfo *)wv->cur_tex->driver : NULL;
+    /* WIDE combine path: textured + non-REPLACE + the 3-attr objects exist + the
+     * array carries colour.  Else the EXACT original 8-float/stride-32 path runs
+     * (REPLACE + untextured = R8-safe, byte-identical). */
+    BOOL wide = (ti && wv->texenv_mode != W3D_REPLACE && wv->ia_has_color &&
+                 wv->info.vs3_handle && wv->info.ve3_handle &&
+                 ((wv->texenv_mode == W3D_MODULATE && wv->info.fs_modulate_handle) ||
+                  (wv->texenv_mode == W3D_DECAL    && wv->info.fs_decal_handle)    ||
+                  (wv->texenv_mode == W3D_BLEND    && wv->info.fs_blend_handle)));
+    num_floats = nverts * (wide ? 12 : 8);
 
     virgl_cmd_init(&cbuf, wv->cmdbuf, W3D_CMDBUF_DWORDS);
     bind_rt_framebuffer(&cbuf, wv);
@@ -1200,15 +1210,38 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
         wv->pending_clear = FALSE;
     }
 
-    virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_VERTEX, wv->info.vs_handle);
-    if (ti) {
-        /* Textured: FS samples GENERIC[0] (the IN[1] slot = texcoord). */
-        virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, wv->info.fs_tex_handle);
+    if (wide) {
+        /* MODULATE/DECAL/BLEND: 3-attr VS (pos+tc+colour) + the mode's FS. */
+        uint32 fs = (wv->texenv_mode == W3D_MODULATE) ? wv->info.fs_modulate_handle
+                  : (wv->texenv_mode == W3D_DECAL)    ? wv->info.fs_decal_handle
+                  :                                     wv->info.fs_blend_handle;
+        virgl_cmd_bind_object(&cbuf, VIRGL_OBJECT_VERTEX_ELEMENTS, wv->info.ve3_handle);
+        virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_VERTEX, wv->info.vs3_handle);
+        virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, fs);
         virgl_cmd_bind_sampler_states(&cbuf, PIPE_SHADER_FRAGMENT, 0, 1,
                                       &wv->info.sampler_linear);
         virgl_cmd_set_sampler_views(&cbuf, PIPE_SHADER_FRAGMENT, 0, 1, &ti->view);
+        if (wv->texenv_mode == W3D_BLEND)
+            virgl_cmd_set_constant_buffer(&cbuf, PIPE_SHADER_FRAGMENT, 0,
+                                          wv->texenv_color, 4);
+        wv->ve3_bound = TRUE;
     } else {
-        virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, wv->info.fs_handle);
+        /* ORIGINAL 2-attr path (REPLACE / untextured).  Rebind VE *only* to undo a
+         * prior wide draw's VE3 bind -- so an all-REPLACE workload (the cow) emits
+         * the EXACT original command stream (no per-draw VE bind). */
+        if (wv->ve3_bound) {
+            virgl_cmd_bind_object(&cbuf, VIRGL_OBJECT_VERTEX_ELEMENTS, wv->info.ve_handle);
+            wv->ve3_bound = FALSE;
+        }
+        virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_VERTEX, wv->info.vs_handle);
+        if (ti) {
+            virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, wv->info.fs_tex_handle);
+            virgl_cmd_bind_sampler_states(&cbuf, PIPE_SHADER_FRAGMENT, 0, 1,
+                                          &wv->info.sampler_linear);
+            virgl_cmd_set_sampler_views(&cbuf, PIPE_SHADER_FRAGMENT, 0, 1, &ti->view);
+        } else {
+            virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, wv->info.fs_handle);
+        }
     }
 
     /* INLINE_WRITE header (11 words) for the vbuf, then the gathered floats. */
@@ -1238,7 +1271,15 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
             virgl_emit_float(&cbuf, z);                       /* ndc z -> depth */
             virgl_emit_float(&cbuf, 1.0f);                    /* w */
         }
-        if (ti) {
+        if (wide) {
+            /* GENERIC[0]=texcoord, GENERIC[1]=vertex colour (12 floats/vert). */
+            const float *t = (const float *)(v + wv->ia_tcoord_off);
+            const float *c = (const float *)(v + wv->ia_color_off);
+            virgl_emit_float(&cbuf, t[0]); virgl_emit_float(&cbuf, t[1]);
+            virgl_emit_float(&cbuf, 0.0f); virgl_emit_float(&cbuf, 1.0f);
+            virgl_emit_float(&cbuf, c[0]); virgl_emit_float(&cbuf, c[1]);
+            virgl_emit_float(&cbuf, c[2]); virgl_emit_float(&cbuf, c[3]);
+        } else if (ti) {
             /* texcoord -> GENERIC[0]; FS_TEX samples .xy.  V follows the
              * geometry (the NDC Y-flip is a rigid flip; per-vertex UVs ride
              * along with it), so do NOT flip V here. */
@@ -1259,10 +1300,21 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
         }
     }
 
-    vb.stride = 32; vb.buffer_offset = 0; vb.res_handle = wv->info.vbuf_res;
+    vb.stride = wide ? 48 : 32; vb.buffer_offset = 0; vb.res_handle = wv->info.vbuf_res;
     virgl_cmd_set_vertex_buffers(&cbuf, 1, &vb);
     virgl_cmd_draw_vbo(&cbuf, 0, nverts, pipe_prim, 0, 1, 0, 0, 0, 0,
                        0, nverts - 1, 0);
+
+    /* NEVER submit a truncated stream: virglrenderer would report "Illegal
+     * command buffer" and poison the host context (display freezes for good
+     * while the guest keeps running).  Dropping this chunk instead costs one
+     * partial draw and a serial line -- fail-visible, ctx stays healthy. */
+    if (cbuf.overflowed) {
+        DW3D("draw_chunk: cmd buffer OVERFLOWED (%lu/%lu dwords, %lu verts %s) -- DROPPED\n",
+             (unsigned long)cbuf.dwords, (unsigned long)cbuf.max_dwords,
+             (unsigned long)nverts, wide ? "wide" : "narrow");
+        return FALSE;
+    }
 
     return g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id,
                           cbuf.buf, cbuf.dwords);
@@ -1272,12 +1324,7 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
                         uint32 prim, uint32 type, uint32 count, void *indices)
 {
     struct W3DVirgl *wv;
-    uint32 idx_size, pipe_prim, done;
-    /* Cap each submit so INLINE_WRITE + draw fit the 64 KiB SUBMIT_3D buffer
-     * (11 + nverts*8 + overhead <= 16384 dwords).  MUST be a multiple of 3 for
-     * TRIANGLES so we never split a triangle across submit chunks (doing so
-     * produces garbage triangles spanning the mesh). */
-    const uint32 CHUNK = 1998;
+    uint32 idx_size, pipe_prim, done, CHUNK;
     (void)Self;
 
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
@@ -1292,6 +1339,34 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
         wv->depth_test  = (fe & W3D_ZBUFFER)       != 0;
         wv->depth_write = (fe & W3D_ZBUFFERUPDATE) != 0;
         wv->blend_on    = (fe & W3D_BLENDING)      != 0;
+        /* TexEnv combine mode + env colour live in the public W3D_Context fields
+         * (globaltexenvmode/globaltexenvcolor) -- the FE's SetTexEnv records them
+         * there.  REPLACE keeps the 2-attr path; MODULATE/DECAL/BLEND go wide. */
+        wv->texenv_mode = ctx->globaltexenvmode ? ctx->globaltexenvmode : W3D_REPLACE;
+        wv->texenv_color[0] = ctx->globaltexenvcolor[0];
+        wv->texenv_color[1] = ctx->globaltexenvcolor[1];
+        wv->texenv_color[2] = ctx->globaltexenvcolor[2];
+        wv->texenv_color[3] = ctx->globaltexenvcolor[3];
+    }
+    /* Cap each submit so INLINE_WRITE + ALL surrounding state commands fit the
+     * SUBMIT_3D buffer (W3D_CMDBUF_DWORDS=16384).  Multiple of 3 so a TRIANGLES
+     * chunk never splits a triangle.  Wide TexEnv path = 12 floats/vert -> 1350
+     * (=450*3): 12+16200 IW plus worst-case state (fb/viewport/scissor/DSA/
+     * blend-create/clear/binds/samplers/constbuf/svb/draw ~= 92 dwords) = 16304.
+     * The original 1359 left only 64 dwords -- the FIRST cow frame (clear +
+     * blend-create + draw in one submit) overflowed by ~10, virglrenderer
+     * reported "Illegal command buffer" and poisoned the host context = the
+     * June 2026 grey-window freeze.  REPLACE path = 8 floats/vert -> 1998
+     * (=666*3), unchanged and historically proven. */
+    CHUNK = (wv->texenv_mode != W3D_REPLACE) ? 1350U : 1998U;
+    /* Transition-only census: one line per texenv MODE CHANGE tells us which
+     * path (WIDE combine vs narrow REPLACE) a real workload actually runs --
+     * the June grey-window revert lacked exactly this visibility. */
+    if (wv->texenv_mode != wv->texenv_mode_logged) {
+        DW3D("texenv mode %lu -> %lu (%s path)\n",
+             (unsigned long)wv->texenv_mode_logged, (unsigned long)wv->texenv_mode,
+             (wv->texenv_mode == W3D_REPLACE) ? "narrow" : "WIDE");
+        wv->texenv_mode_logged = wv->texenv_mode;
     }
     DW3D("DrawElements: prim=%lu count=%lu\n", (unsigned long)prim, (unsigned long)count);
     if (!wv->ia_ptr || !indices || count == 0) return W3D_ILLEGALINPUT;

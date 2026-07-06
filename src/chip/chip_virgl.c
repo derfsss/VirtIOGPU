@@ -31,11 +31,13 @@ void virgl_cmd_init(struct VirglCmdBuf *cbuf, uint32 *buf, uint32 max_dwords)
     cbuf->buf        = buf;
     cbuf->dwords     = 0;
     cbuf->max_dwords = max_dwords;
+    cbuf->overflowed = 0;
 }
 
 void virgl_cmd_reset(struct VirglCmdBuf *cbuf)
 {
     cbuf->dwords = 0;
+    cbuf->overflowed = 0;
 }
 
 #ifndef VIRGL_ENCODE_ONLY
@@ -44,6 +46,16 @@ void virgl_cmd_reset(struct VirglCmdBuf *cbuf)
 BOOL virgl_submit(struct ChipGPUState *gs, uint32 ctx_id, struct VirglCmdBuf *cbuf)
 {
     if (cbuf->dwords == 0) return TRUE;  /* nothing to submit */
+
+    /* A truncated stream would make virglrenderer poison the host context
+     * ("Illegal command buffer" -> display freezes for good).  Refuse it here:
+     * nothing was sent, so the context stays healthy -- fail-visible. */
+    if (cbuf->overflowed) {
+        DCHIP("virgl_submit: cmd buffer OVERFLOWED (%lu/%lu dwords) -- REFUSED",
+              (unsigned long)cbuf->dwords, (unsigned long)cbuf->max_dwords);
+        virgl_cmd_reset(cbuf);
+        return FALSE;
+    }
 
     /* If context is already poisoned, don't bother submitting */
     if (gs->virgl_ctx_error) {
@@ -604,6 +616,65 @@ static const char tgsi_fs_texture[] =
     "  0: TEX OUT[0], IN[0], SAMP[0], 2D\n"
     "  1: END\n";
 
+/* ===== W3D_SetTexEnv combine pipeline (MODULATE/DECAL/BLEND) =====
+ * These carry BOTH an interpolated texcoord (GENERIC[0]) AND a vertex colour
+ * (GENERIC[1]); vertex layout pos[4]@0, texcoord[4]@16, colour[4]@32, stride 48.
+ * REPLACE keeps using tgsi_fs_texture above + the 2-attr pipeline.  All static
+ * const (avoids the newlib .rodata memcpy link fail). */
+static const char tgsi_vs_tc_color[] =
+    "VERT\n"
+    "DCL IN[0]\n"
+    "DCL IN[1]\n"
+    "DCL IN[2]\n"
+    "DCL OUT[0], POSITION\n"
+    "DCL OUT[1], GENERIC[0]\n"
+    "DCL OUT[2], GENERIC[1]\n"
+    "  0: MOV OUT[0], IN[0]\n"
+    "  1: MOV OUT[1], IN[1]\n"
+    "  2: MOV OUT[2], IN[2]\n"
+    "  3: END\n";
+
+/* W3D_MODULATE: out = texel * vertex_colour (lit texturing). */
+static const char tgsi_fs_modulate[] =
+    "FRAG\n"
+    "DCL IN[0], GENERIC[0], PERSPECTIVE\n"
+    "DCL IN[1], GENERIC[1], PERSPECTIVE\n"
+    "DCL OUT[0], COLOR\n"
+    "DCL SAMP[0]\n"
+    "DCL TEMP[0]\n"
+    "  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n"
+    "  1: MUL OUT[0], TEMP[0], IN[1]\n"
+    "  2: END\n";
+
+/* W3D_DECAL: RGB = lerp(frag.rgb, texel.rgb, texel.a); A = frag.a. */
+static const char tgsi_fs_decal[] =
+    "FRAG\n"
+    "DCL IN[0], GENERIC[0], PERSPECTIVE\n"
+    "DCL IN[1], GENERIC[1], PERSPECTIVE\n"
+    "DCL OUT[0], COLOR\n"
+    "DCL SAMP[0]\n"
+    "DCL TEMP[0]\n"
+    "  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n"
+    "  1: LRP OUT[0].xyz, TEMP[0].wwww, TEMP[0], IN[1]\n"
+    "  2: MOV OUT[0].w, IN[1]\n"
+    "  3: END\n";
+
+/* W3D_BLEND: RGB = lerp(frag.rgb, env.rgb, texel.rgb); A = frag.a * texel.a. */
+static const char tgsi_fs_blend[] =
+    "FRAG\n"
+    "DCL IN[0], GENERIC[0], PERSPECTIVE\n"
+    "DCL IN[1], GENERIC[1], PERSPECTIVE\n"
+    "DCL OUT[0], COLOR\n"
+    "DCL SAMP[0]\n"
+    "DCL CONST[0]\n"
+    "DCL TEMP[0]\n"
+    "DCL TEMP[1]\n"
+    "  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n"
+    "  1: LRP TEMP[1].xyz, TEMP[0], CONST[0], IN[1]\n"
+    "  2: MUL TEMP[1].w, IN[1], TEMP[0]\n"
+    "  3: MOV OUT[0], TEMP[1]\n"
+    "  4: END\n";
+
 void virgl_setup_passthrough_vs(struct VirglCmdBuf *cbuf, uint32 handle)
 {
     DCHIP("virgl_setup_passthrough_vs: handle=%lu", handle);
@@ -623,6 +694,40 @@ void virgl_setup_texture_fs(struct VirglCmdBuf *cbuf, uint32 handle)
     DCHIP("virgl_setup_texture_fs: handle=%lu", handle);
     virgl_cmd_create_shader(cbuf, handle, PIPE_SHADER_FRAGMENT,
                              tgsi_fs_texture);
+}
+
+void virgl_setup_tc_color_vs(struct VirglCmdBuf *cbuf, uint32 handle)
+{
+    DCHIP("virgl_setup_tc_color_vs: handle=%lu", handle);
+    virgl_cmd_create_shader(cbuf, handle, PIPE_SHADER_VERTEX, tgsi_vs_tc_color);
+}
+void virgl_setup_modulate_fs(struct VirglCmdBuf *cbuf, uint32 handle)
+{
+    DCHIP("virgl_setup_modulate_fs: handle=%lu", handle);
+    virgl_cmd_create_shader(cbuf, handle, PIPE_SHADER_FRAGMENT, tgsi_fs_modulate);
+}
+void virgl_setup_decal_fs(struct VirglCmdBuf *cbuf, uint32 handle)
+{
+    DCHIP("virgl_setup_decal_fs: handle=%lu", handle);
+    virgl_cmd_create_shader(cbuf, handle, PIPE_SHADER_FRAGMENT, tgsi_fs_decal);
+}
+void virgl_setup_blend_fs(struct VirglCmdBuf *cbuf, uint32 handle)
+{
+    DCHIP("virgl_setup_blend_fs: handle=%lu", handle);
+    virgl_cmd_create_shader(cbuf, handle, PIPE_SHADER_FRAGMENT, tgsi_fs_blend);
+}
+
+/* SET_CONSTANT_BUFFER -- upload float constants to a shader stage's CONST file.
+ * Payload: shader_type, index(0=default uniform block -> CONST[0..]), float words. */
+void virgl_cmd_set_constant_buffer(struct VirglCmdBuf *cbuf, uint32 shader_type,
+                                   uint32 index, const float *data, uint32 nfloats)
+{
+    uint32 i;
+    virgl_emit_dword(cbuf, VIRGL_CMD_HDR(VIRGL_CCMD_SET_CONSTANT_BUFFER, 0, 2 + nfloats));
+    virgl_emit_dword(cbuf, shader_type);
+    virgl_emit_dword(cbuf, index);
+    for (i = 0; i < nfloats; i++)
+        virgl_emit_float(cbuf, data[i]);   /* IEEE bits, GP32-swapped */
 }
 
 /* -----------------------------------------------------------------------

@@ -336,6 +336,13 @@ struct VirglCmdBuf {
     uint32 *buf;            /* pointer to uint32 array */
     uint32  dwords;         /* current write position (in uint32 words) */
     uint32  max_dwords;     /* capacity (in uint32 words) */
+    uint32  overflowed;     /* != 0: an emit was dropped -> the stream is
+                             * TRUNCATED MID-COMMAND.  Submitting it makes
+                             * virglrenderer report "Illegal command buffer"
+                             * and poison the host context (whole display
+                             * freezes while the guest keeps running -- the
+                             * June 2026 texenv grey-window).  Callers MUST
+                             * check this and refuse to submit. */
 };
 
 /* -----------------------------------------------------------------------
@@ -356,6 +363,8 @@ static inline void virgl_emit_dword(struct VirglCmdBuf *cbuf, uint32 val)
 {
     if (cbuf->dwords < cbuf->max_dwords)
         cbuf->buf[cbuf->dwords++] = GP32(val);
+    else
+        cbuf->overflowed = 1;   /* dropped -> stream truncated; see struct */
 }
 
 /* Emit a float as its IEEE 754 bit pattern, GP32-swapped. */
@@ -485,6 +494,13 @@ void virgl_setup_default_rasterizer(struct VirglCmdBuf *cbuf, uint32 handle);
 void virgl_setup_passthrough_vs(struct VirglCmdBuf *cbuf, uint32 handle);
 void virgl_setup_color_fs(struct VirglCmdBuf *cbuf, uint32 handle);
 void virgl_setup_texture_fs(struct VirglCmdBuf *cbuf, uint32 handle);
+/* W3D_SetTexEnv combine pipeline */
+void virgl_setup_tc_color_vs(struct VirglCmdBuf *cbuf, uint32 handle);
+void virgl_setup_modulate_fs(struct VirglCmdBuf *cbuf, uint32 handle);
+void virgl_setup_decal_fs(struct VirglCmdBuf *cbuf, uint32 handle);
+void virgl_setup_blend_fs(struct VirglCmdBuf *cbuf, uint32 handle);
+void virgl_cmd_set_constant_buffer(struct VirglCmdBuf *cbuf, uint32 shader_type,
+                                   uint32 index, const float *data, uint32 nfloats);
 
 /* Sampler state + view */
 void virgl_cmd_create_sampler_state(struct VirglCmdBuf *cbuf, uint32 handle,

@@ -1095,6 +1095,12 @@ void chip_flush_task_entry(void)
             chip_virgl_recover_2d(gs);
         }
 
+        /* gpu.library exclusive display held (Phase 6): the fullscreen
+         * client owns the scanout and presents via its own FLUSHRECT --
+         * skip desktop presentation entirely until release. */
+        if (gs->gpub_display_parked)
+            continue;
+
         /* Main work -- always full-frame because GRANTDIRECTACCESS means
          * we cannot know exactly which pixels changed. */
         HOT_STAGE(gs, "flush_all:enter");

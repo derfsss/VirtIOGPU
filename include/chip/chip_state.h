@@ -534,6 +534,8 @@ struct ChipGPUState {
     uint32  v3d_overlay_w, v3d_overlay_h;
     uint32  v3d_overlay_sw, v3d_overlay_sh; /* RT (src) dims */
     uint32  v3d_next_handle;    /* virgl object handle allocator for v3d (>=200) */
+    volatile BOOL gpub_display_parked; /* gpu.library exclusive display held:
+                                          flush task must NOT present (Phase 6) */
 
     /* v3d PresentBitmap -- readback resource + DMA buffer (B8G8R8X8) used to
      * pull a warp3d RT back to guest memory before reverse-converting it into

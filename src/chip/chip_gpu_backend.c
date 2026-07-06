@@ -25,6 +25,7 @@
 
 #include <exec/exectags.h>
 #include <exec/memory.h>
+#include <utility/hooks.h>
 
 static struct Library  *vgb_GpuBase;
 static struct GpuIFace *vgb_IGpu;
@@ -196,6 +197,46 @@ static int32 vgb_Present(APTR priv, struct GpuBuffer *buf,
     return GPUERR_OK;
 }
 
+/* ---- exclusive display hand-off hook (Phase 6) --------------------------
+ * ACQUIRE: park the flush task's desktop presentation and hand the caller
+ * the scanout geometry. RELEASE: resume + force a full-frame refresh so
+ * the desktop reappears. Runs in the acquiring client's task context.  */
+
+static uint32 vgb_display_hook_entry(struct Hook *hook, APTR object,
+                                     APTR message)
+{
+    struct ChipGPUState *gs = (struct ChipGPUState *)hook->h_Data;
+    struct GpuDisplayMsg *msg = (struct GpuDisplayMsg *)message;
+    (void)object;
+
+    switch (msg->Op)
+    {
+        case GPUDISP_ACQUIRE:
+            gs->gpub_display_parked = TRUE;
+            msg->Width       = gs->fb_width;
+            msg->Height      = gs->fb_height;
+            msg->PixelFormat = 0;   /* scanout is B8G8R8X8; RGBFTYPE n/a */
+            msg->BackendData = (APTR)gs->resource_id;
+            DCHIP("gpu_backend: display ACQUIRED (%lux%lu res=%lu) -- "
+                  "desktop presentation parked",
+                  (unsigned long)gs->fb_width,
+                  (unsigned long)gs->fb_height,
+                  (unsigned long)gs->resource_id);
+            return 0;
+
+        case GPUDISP_RELEASE:
+            gs->gpub_display_parked = FALSE;
+            chip_flush_signal_activity(gs);   /* full refresh next frame */
+            DCHIP("gpu_backend: display RELEASED -- desktop restored");
+            return 0;
+
+        default:
+            return 1;
+    }
+}
+
+static struct Hook vgb_display_hook;
+
 /* ---- registration (called from the flush task's startup) ---------------- */
 
 void gpu_backend_init(struct ChipGPUState *gs)
@@ -243,8 +284,12 @@ void gpu_backend_init(struct ChipGPUState *gs)
     info.WaitFence     = vgb_WaitFence;
     info.Present       = vgb_Present;
 
+    vgb_display_hook.h_Entry = (HOOKFUNC)vgb_display_hook_entry;
+    vgb_display_hook.h_Data  = gs;
+
     vgb_backendId = vgb_IGpu->GPU_RegisterBackendA(&info, GPU_TAGS(
-                        { GPUTAG_AsyncFences, TRUE }));
+                        { GPUTAG_AsyncFences, TRUE },
+                        { GPUTAG_DisplayHook, (uint32)&vgb_display_hook }));
     if (vgb_backendId < 0)
     {
         DCHIP("gpu_backend: RegisterBackendA failed (%ld)",

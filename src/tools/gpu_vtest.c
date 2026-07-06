@@ -7,6 +7,7 @@
 */
 
 #include <proto/exec.h>
+#include <proto/dos.h>
 #include <proto/graphics.h>
 #include <graphics/gfx.h>
 #include <libraries/gpu.h>
@@ -242,6 +243,55 @@ int main(void)
                                 rc = 10;
                             }
                             IGraphics->FreeBitMap(bm);
+                        }
+                    }
+
+                    /* Phase 6: exclusive fullscreen. Acquire parks the
+                       desktop; the triangle we draw PERSISTS (no flush
+                       task overwrite) for 2 seconds; release restores
+                       the desktop. Watch the SDL window. */
+                    {
+                        struct GpuDisplay *d = IGpu->GPU_AcquireDisplayA(
+                            GPU_TAGS({ GPUTAG_Backend, (uint32)vid }));
+                        if (d != NULL)
+                        {
+                            struct VgbFlushRect fx;
+                            printf("gpu_vtest: display ACQUIRED %lux%lu "
+                                   "scanout=%lu\n",
+                                   (unsigned long)d->Width,
+                                   (unsigned long)d->Height,
+                                   (unsigned long)(uint32)d->BackendData);
+                            if (IGpu->GPU_AcquireDisplayA(GPU_TAGS(
+                                    { GPUTAG_Backend,
+                                      (uint32)vid })) != NULL)
+                            {
+                                printf("gpu_vtest: double-acquire NOT "
+                                       "refused!\n");
+                                rc = 10;
+                            }
+
+                            cmd->op  = VGB_OP_TRITEST;
+                            cmd->arg = 0;
+                            IGpu->GPU_SubmitA(GPU_QUEUE_RENDER, cmd,
+                                sizeof(*cmd),
+                                GPU_TAGS({ GPUTAG_Backend, (uint32)vid }));
+                            fx.hdr.op  = VGB_OP_FLUSHRECT;
+                            fx.hdr.arg = (uint32)d->BackendData;
+                            fx.x = 0; fx.y = 0;
+                            fx.w = d->Width; fx.h = d->Height;
+                            IGpu->GPU_SubmitA(GPU_QUEUE_RENDER, &fx,
+                                sizeof(fx),
+                                GPU_TAGS({ GPUTAG_Backend, (uint32)vid }));
+
+                            IDOS->Delay(100);   /* 2s of owned display */
+                            IGpu->GPU_ReleaseDisplay(d);
+                            printf("gpu_vtest: display RELEASED -- "
+                                   "desktop restored\n");
+                        }
+                        else
+                        {
+                            printf("gpu_vtest: AcquireDisplay failed\n");
+                            rc = 10;
                         }
                     }
                 }

@@ -16,7 +16,8 @@
 #include <utility/tagitem.h>
 #endif
 
-struct BitMap;   /* graphics/gfx.h — forward-declared to keep this header light */
+struct BitMap;   /* graphics/gfx.h  — forward-declared to keep this header light */
+struct Hook;     /* utility/hooks.h — forward-declared to keep this header light */
 
 #define GPU_LIBNAME      "gpu.library"
 #define GPU_API_VERSION  1              /* IGpu "main" interface version   */
@@ -58,7 +59,38 @@ struct GpuBuffer
     APTR    BackendData;
 };
 
-struct GpuDisplay;               /* opaque in v0 (GPU_AcquireDisplayA)     */
+/* Exclusive display grant (GPU_AcquireDisplayA — Phase 6, appended).
+** While held, the owning backend's desktop presentation is PARKED (its
+** display hook was called with GPUDISP_ACQUIRE) and the client owns the
+** scanout — render via backend submits, present via backend flush ops.
+** GPU_ReleaseDisplay restores the desktop. One display per backend;
+** a second acquire returns NULL (busy). Fields are read-only.          */
+struct GpuDisplay
+{
+    int32   BackendId;
+    uint32  Width;
+    uint32  Height;
+    uint32  PixelFormat;     /* RGBFTYPE                                 */
+    APTR    BackendData;     /* backend-specific (e.g. scanout handle)   */
+};
+
+/* Driver-side display hand-off hook (registered via GPUTAG_DisplayHook):
+** utility.library Hook, called from the acquiring client's task context
+** as CallHookPkt(hook, NULL, struct GpuDisplayMsg *). On GPUDISP_ACQUIRE
+** the backend parks desktop presentation and FILLS Width/Height/
+** PixelFormat/BackendData; on GPUDISP_RELEASE it restores the desktop.
+** Return 0 to grant, nonzero to refuse the acquire.                    */
+#define GPUDISP_ACQUIRE  1
+#define GPUDISP_RELEASE  2
+
+struct GpuDisplayMsg
+{
+    uint32  Op;              /* GPUDISP_*                                */
+    uint32  Width;           /* filled by the hook on ACQUIRE            */
+    uint32  Height;
+    uint32  PixelFormat;
+    APTR    BackendData;
+};
 
 /* Fence-retirement notification (GPUTAG_NotifyPort): the library PutMsg()s
 ** one of these to the given port when the fence retires. The client MUST
@@ -141,6 +173,9 @@ struct GpuFenceMsg
 ** delivery until then. Retirement is monotonic: reporting seq N retires
 ** every pending seq <= N.                                              */
 #define GPUTAG_AsyncFences     (GPU_TAGBASE + 64)  /* BOOL                 */
+/* GPUTAG_DisplayHook (struct Hook *): the backend supports exclusive
+** display hand-off — see struct GpuDisplayMsg above.                    */
+#define GPUTAG_DisplayHook     (GPU_TAGBASE + 65)  /* struct Hook *        */
 
 /* ---- Backend registration (driver side) --------------------------------
 ** Version field FIRST. NULL ops => library returns GPUERR_NOTIMPL for that

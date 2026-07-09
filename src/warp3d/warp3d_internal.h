@@ -96,6 +96,9 @@ struct W3DVirgl {
     uint32 dsa_handle;              /* base DSA handle (test+write, == DSA_TW) */
     BOOL   depth_test;              /* W3D_ZBUFFER       (default TRUE) */
     BOOL   depth_write;             /* W3D_ZBUFFERUPDATE (default TRUE) */
+    uint32 depth_func;              /* PIPE_FUNC_* from SetZCompareMode
+                                     * (default LESS; non-LESS routes the
+                                     * draw to the dynamic DSA) */
 
     /* Currently bound texture (TMU 0), NULL = untextured (colour) draws. */
     W3D_Texture *cur_tex;
@@ -226,6 +229,8 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error, struct T
 W3D_Context *w3d_CreateContextTags(struct Warp3DIFace *Self, uint32 *error, ...);
 W3D_Driver **w3d_GetDrivers(struct Warp3DIFace *Self);
 uint32       w3d_ClearBuffers(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Color *color, W3D_Double *depth, uint32 *stencil);
+uint32       w3d_ClearZBuffer(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Double *clearvalue);
+uint32       w3d_SetZCompareMode(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 mode);
 void         w3d_DestroyContext(struct Warp3DIFace *Self, W3D_Context *ctx);
 uint32       w3d_GetState(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 state);
 uint32       w3d_SetState(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 state, uint32 action);

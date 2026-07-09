@@ -402,12 +402,16 @@ static void bind_dsa(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
 {
     BOOL alpha   = (wv->alpha_on && wv->alpha_func);
     BOOL stencil = wv->stencil_on;
+    /* Non-LESS depth funcs (SetZCompareMode -- e.g. Quake2's EQUAL lightmap
+     * pass) need the dynamic DSA: the three static objects are LESS-only. */
+    uint32 zfunc = wv->depth_func ? wv->depth_func : PIPE_FUNC_LESS;
+    BOOL zdyn    = (wv->depth_test && zfunc != PIPE_FUNC_LESS);
     if (!wv->dsa_handle) return;
-    if (alpha || stencil) {
+    if (alpha || stencil || zdyn) {
         uint32 s0 = (wv->depth_test
                        ? (VIRGL_DSA_S0_DEPTH_ENABLE(1) |
                           VIRGL_DSA_S0_DEPTH_WRITEMASK(wv->depth_write ? 1 : 0) |
-                          VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_LESS))
+                          VIRGL_DSA_S0_DEPTH_FUNC(zfunc))
                        : (VIRGL_DSA_S0_DEPTH_ENABLE(1) |
                           VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_ALWAYS)));
         uint32 s1 = 0;
@@ -814,6 +818,7 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
     /* Shared depth buffer + a depth-test DSA (LESS, write enabled) so the cow
      * surfaces occlude correctly regardless of triangle draw order. */
     wv->depth_test = TRUE; wv->depth_write = TRUE;
+    wv->depth_func = PIPE_FUNC_LESS;
     /* Unique per-context handle block (Bug 1 fix -- see WH_* above).
      * __sync atomic per the SMP policy; 32K blocks before the sequence
      * wraps, far beyond any realistic context churn. */
@@ -1123,6 +1128,29 @@ static uint32 w3d_alphafunc(uint32 mode)
     case W3D_A_ALWAYS:   return PIPE_FUNC_ALWAYS;
     default:             return PIPE_FUNC_ALWAYS;
     }
+}
+
+/* W3D_SetZCompareMode -- the depth compare func (FE slot 37).  Was a silent
+ * "accept it" that left LESS hardwired: Quake2's lightmap pass draws at
+ * depth EQUAL over already-drawn world geometry, so under forced LESS every
+ * lightmap fragment z-fails -> the 2026-07-09 "no lighting" symptom.
+ * W3D_Z_* uses the same 1..8 series as W3D_A_*, so the alpha mapping fits;
+ * unknown modes keep LESS (the safe default for depth, unlike alpha). */
+uint32 w3d_SetZCompareMode(struct Warp3DIFace *Self, W3D_Context *ctx,
+                           uint32 mode)
+{
+    struct W3DVirgl *wv;
+    uint32 f;
+    (void)Self;
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    f = (mode >= 1 && mode <= 8) ? w3d_alphafunc(mode) : PIPE_FUNC_LESS;
+    if (f != wv->depth_func) {
+        DW3D("SetZCompareMode: mode=%lu -> pipe func %lu\n",
+             (unsigned long)mode, (unsigned long)f);
+        wv->depth_func = f;
+    }
+    return W3D_SUCCESS;
 }
 
 uint32 w3d_SetAlphaMode(struct Warp3DIFace *Self, W3D_Context *ctx,
@@ -2230,7 +2258,43 @@ uint32 w3d_ClearDrawRegion(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 co
     return W3D_SUCCESS;
 }
 
-/* W3D_ClearBuffers: defer a colour clear (depth/stencil clear is task #30). */
+/* W3D_ClearZBuffer -- depth-only clear (FE slot 11).  MiniGL clears Z
+ * separately from colour (glClear(GL_DEPTH_BUFFER_BIT)); this was a silent
+ * per-frame no-op (~1/frame in every MiniGL workload census), leaving stale
+ * depth so ZLESS progressively rejects fresh geometry -- the 2026-07-09
+ * Q2-MiniGL misrender suspect.  Immediate submit (unlike the deferred
+ * colour clear): the FE call site is a real pass boundary, and the deferred
+ * colour clear executes with the NEXT draw so ordering is preserved. */
+uint32 w3d_ClearZBuffer(struct Warp3DIFace *Self, W3D_Context *ctx,
+                        W3D_Double *clearvalue)
+{
+    struct W3DVirgl *wv;
+    uint32 cmd_words[64];
+    struct VirglCmdBuf cbuf;
+    double z = 1.0;
+    (void)Self;
+
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    if (!wv->zres) return W3D_SUCCESS;  /* no depth buffer: nothing to clear */
+    if (clearvalue) z = (double)*clearvalue;
+    DW3D("ClearZBuffer: z*1000=%ld\n", (long)(z * 1000.0));
+    virgl_cmd_init(&cbuf, cmd_words, 64);
+    bind_rt_framebuffer(&cbuf, wv);
+    virgl_cmd_clear(&cbuf, 1 /*PIPE_CLEAR_DEPTH*/, 0.0f, 0.0f, 0.0f, 0.0f,
+                    z, 0);
+    if (cbuf.overflowed) {
+        DW3D("ClearZBuffer: cmd buffer OVERFLOWED -- DROPPED\n");
+        return W3D_SUCCESS;
+    }
+    g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id,
+                   cbuf.buf, cbuf.dwords);
+    return W3D_SUCCESS;
+}
+
+/* W3D_ClearBuffers: defer a colour clear (depth clears with it -- the
+ * deferred clear is COLOR0|DEPTH; standalone depth clears go through
+ * w3d_ClearZBuffer above; stencil clear is still task #30). */
 uint32 w3d_ClearBuffers(struct Warp3DIFace *Self, W3D_Context *ctx,
                         W3D_Color *color, W3D_Double *depth, uint32 *stencil)
 {

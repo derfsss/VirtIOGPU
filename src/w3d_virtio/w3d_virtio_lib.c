@@ -172,6 +172,55 @@ static uint32 _main_Release(struct Interface *Self) { return Self->Data.RefCount
  * the exact FE code path (registration vs selection vs CreateContext vs a caps
  * probe).  ra - FE_load_base = the fe5327.dis file offset of the call site. */
 static uint32 g_dummy_state[16];    /* non-NULL handle ClearDrawRegion returns */
+
+/* NOOP visibility (user directive 2026-07-09, after the DrawArray silent-
+ * reject cost a day): every stub dispatch is NAMED, per-slot hit-counted,
+ * and a census line summarises the top offenders -- so a misrendering
+ * workload tells us on serial exactly WHICH operations were dropped.
+ * Names = RE slot map fe5327_slotmap_draft.md (map index + 4 = runtime
+ * index at the 60-byte iface base); '?' marks unconfirmed identities. */
+static uint32 g_hw_slot_hits[96];
+
+static const char *hw_slot_name(long slot)
+{
+    switch (slot) {
+    case 4:  return "AllocTexObj?/regtest";
+    case 5:  return "CheckIdle";
+    case 6:  return "FlushTextures?";
+    case 12: return "UploadTexture?/DrawPoint?";
+    case 13: return "state-op13";
+    case 18: return "driver-id";
+    case 19: return "fmt-query";
+    case 21: return "FreeZBuffer?";
+    case 22: return "ReadZPixel?";
+    case 26: return "ReadZSpan?";
+    case 27: return "SetLogicOp?";
+    case 39: return "GetTexFmtInfo?/Hint?";
+    case 42: return "SetPenMask?/regtest";
+    case 43: return "Hint?";
+    case 46: return "ReadStencilPixel?";
+    case 49: return "ReadStencilSpan?";
+    case 51: return "WriteZPixel?";
+    case 52: return "WriteZSpan?";
+    case 53: return "SetCurrentColor?";
+    case 54: return "SetCurrentPen?";
+    case 55: return "UpdateTexSubImage?";
+    case 57: return "identify";
+    case 59: return "DrawLineStrip?";
+    case 60: return "DrawLineLoop?";
+    case 61: return "regtest61";
+    case 62: return "FlushFrame?";
+    case 63: return "SetScissor?";
+    case 64: return "SetChromaTestBounds?";
+    case 76: return "SetTextureBlend?";
+    case 77: return "SecondaryColorPointer?";
+    case 78: return "FogCoordPointer?";
+    case 81: return "SetParameter?";
+    case 82: return "SetMaxAnisotropy?";
+    default: return "unk";
+    }
+}
+
 static uint32 hw_dispatch(long slot, uint32 a, uint32 b, uint32 c, uint32 d, uint32 ra)
 {
     uint32 ret = 0;
@@ -222,9 +271,40 @@ static uint32 hw_dispatch(long slot, uint32 a, uint32 b, uint32 c, uint32 d, uin
     case 22: case 42:               /* ReadZPixel/SetPenMask -> 0                  */
     default: ret = 0; break;
     }
-    DBP("slot %ld ra=%08lx a=%08lx b=%08lx c=%08lx d=%08lx -> %08lx\n",
-        slot, (unsigned long)ra, (unsigned long)a, (unsigned long)b,
-        (unsigned long)c, (unsigned long)d, (unsigned long)ret);
+    /* Rate-limited named logging: first 4 hits of each slot in full, then
+     * every 256th (the old line-per-call spam was itself a perf tax --
+     * Finding 6).  A census every 1024 stub dispatches lists every slot
+     * that has been hit, so dropped ops can never hide. */
+    {
+        uint32 n = (slot >= 0 && slot < 96) ? ++g_hw_slot_hits[slot] : 0;
+        static uint32 g_hw_stub_total = 0;
+        if (n <= 4 || (n & 0xFF) == 0)
+            DBP("slot %ld (%s) ra=%08lx a=%08lx b=%08lx c=%08lx d=%08lx "
+                "-> %08lx [NOOP hit %lu]\n",
+                slot, hw_slot_name(slot), (unsigned long)ra, (unsigned long)a,
+                (unsigned long)b, (unsigned long)c, (unsigned long)d,
+                (unsigned long)ret, (unsigned long)n);
+        /* slot 53 identity probe (Q2: 88K hits/session from ONE call site,
+         * b = near-constant RAM pointer).  Dump the pointee so we can tell a
+         * W3D_Color (4 floats in [0,1] -> SetCurrentColor) from a
+         * W3D_Texture (dims/pointers) without guessing. */
+        if (slot == 53 && (n <= 4 || (n & 0xFFF) == 0) &&
+            b >= 0x10000000 && b < 0x80000000) {
+            const volatile uint32 *p = (const volatile uint32 *)(APTR)b;
+            DBP("slot53 probe b[0..5]=%08lx %08lx %08lx %08lx %08lx %08lx\n",
+                (unsigned long)p[0], (unsigned long)p[1], (unsigned long)p[2],
+                (unsigned long)p[3], (unsigned long)p[4], (unsigned long)p[5]);
+        }
+        if ((++g_hw_stub_total & 0x3FF) == 0) {
+            int i;
+            DBP("NOOP census (%lu stub dispatches):\n",
+                (unsigned long)g_hw_stub_total);
+            for (i = 0; i < 96; i++)
+                if (g_hw_slot_hits[i])
+                    DBP("  slot %d (%s) = %lu\n", i, hw_slot_name(i),
+                        (unsigned long)g_hw_slot_hits[i]);
+        }
+    }
     return ret;
 }
 
@@ -234,9 +314,9 @@ static uint32 hw_dispatch(long slot, uint32 a, uint32 b, uint32 c, uint32 d, uin
  * are wired to the proven w3d_* render core in the vtable below. */
 #define HWSTUB(n) static uint32 hw_s##n(APTR Self,uint32 a,uint32 b,uint32 c,uint32 d){ (void)Self; return hw_dispatch((n),a,b,c,d,(uint32)(APTR)__builtin_return_address(0)); }
 HWSTUB(4)  HWSTUB(5)  HWSTUB(6)  HWSTUB(7)  HWSTUB(8)  HWSTUB(9)
-HWSTUB(10) HWSTUB(11) HWSTUB(12) HWSTUB(13) HWSTUB(14) HWSTUB(15) HWSTUB(16) HWSTUB(17) HWSTUB(18) HWSTUB(19)
+HWSTUB(10) HWSTUB(12) HWSTUB(13) HWSTUB(14) HWSTUB(15) HWSTUB(16) HWSTUB(17) HWSTUB(18) HWSTUB(19)
 HWSTUB(20) HWSTUB(21) HWSTUB(22) HWSTUB(23) HWSTUB(24) HWSTUB(25) HWSTUB(26) HWSTUB(27) HWSTUB(28) HWSTUB(29)
-HWSTUB(30) HWSTUB(31) HWSTUB(32) HWSTUB(33) HWSTUB(34) HWSTUB(35) HWSTUB(36) HWSTUB(37) HWSTUB(38) HWSTUB(39)
+HWSTUB(30) HWSTUB(31) HWSTUB(32) HWSTUB(33) HWSTUB(34) HWSTUB(35) HWSTUB(37) HWSTUB(38) HWSTUB(39)
 HWSTUB(40) HWSTUB(41) HWSTUB(42) HWSTUB(43) HWSTUB(44) HWSTUB(45) HWSTUB(46) HWSTUB(47) HWSTUB(48) HWSTUB(49)
 HWSTUB(50) HWSTUB(51) HWSTUB(52) HWSTUB(53) HWSTUB(54) HWSTUB(55) HWSTUB(56) HWSTUB(57) HWSTUB(58) HWSTUB(59)
 HWSTUB(60) HWSTUB(61) HWSTUB(62) HWSTUB(63) HWSTUB(64) HWSTUB(65) HWSTUB(66) HWSTUB(67) HWSTUB(68)
@@ -258,6 +338,19 @@ static uint32 hw_AllocZBuffer(APTR Self, W3D_Context *ctx)
 {
     if (!ctx_ok(ctx)) return 0;                            /* registration: SUCCESS */
     return w3d_AllocZBuffer((struct Warp3DIFace *)Self, ctx);
+}
+/* slot 11 (off 104) = W3D_ClearZBuffer (RE map slot 7 + 4: ClearBuffers/
+ * ClearZBuffer; runtime: fires ~once per frame in EVERY MiniGL workload with
+ * b = a RAM pointer = &clearvalue).  Was a silent hw_dispatch no-op -- stale
+ * depth accumulating across frames = the Q2-MiniGL misrender suspect. */
+static uint32 hw_ClearZ11(APTR Self, W3D_Context *ctx, uint32 valptr,
+                          uint32 c, uint32 d)
+{
+    (void)Self; (void)c; (void)d;
+    if (!ctx_ok(ctx)) return 0;                            /* registration ctx */
+    return w3d_ClearZBuffer((struct Warp3DIFace *)0, ctx,
+        (valptr >= 0x10000000 && valptr < 0x80000000)
+            ? (W3D_Double *)(APTR)valptr : (W3D_Double *)0);
 }
 static uint32 hw_ClearDrawRegion(APTR Self, W3D_Context *ctx, uint32 color)
 {
@@ -380,13 +473,15 @@ static uint32 hw_SetStateFn(APTR Self, W3D_Context *ctx, uint32 state, uint32 ac
     if (state >= 0x6f && state <= 0x72) return 2048;
     return w3d_SetState((struct Warp3DIFace *)0, ctx, state, action);
 }
-/* SetZCompareMode(ctx, mode) at off 208 (idx 37): the render core's DSA is already
- * LESS+write (matches the cow's ZLESS), so accept it. */
+/* SetZCompareMode(ctx, mode) at off 208 (idx 37).  Was "accept and ignore"
+ * (LESS hardwired) -- which z-failed Quake2's depth-EQUAL lightmap pass
+ * entirely (the 2026-07-09 "no lighting" symptom).  Now recorded; non-LESS
+ * funcs route the draw to the dynamic DSA. */
 static uint32 hw_SetZCompare(APTR Self, W3D_Context *ctx, uint32 mode)
 {
-    (void)Self; (void)mode;
+    (void)Self;
     if (!get_wv(ctx)) return 0;
-    return 0;   /* W3D_SUCCESS */
+    return w3d_SetZCompareMode((struct Warp3DIFace *)0, ctx, mode);
 }
 /* ClearBuffers/ClearDrawRegion at off 320 (idx 65): the cow's per-frame clear.  The
  * render core's frame_clear (via w3d_ClearDrawRegion) clears BOTH colour+depth on the
@@ -600,7 +695,8 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)hw_AllocZBuffer,  /* 8  AllocZBuffer (base 60, off 92) */
     (APTR)hw_CreateContext, /* 9  CreateContext */
     (APTR)hw_ClearStencil,  /* 10 ClearStencilBuffer (off 100) */
-    (APTR)hw_s11, (APTR)hw_s12,
+    (APTR)hw_ClearZ11,      /* 11 ClearZBuffer (depth-only; was silent NOOP) */
+    (APTR)hw_s12,
     (APTR)hw_s13,           /* 13 (was DrawTriangle: mis-mapped state op) */
     (APTR)hw_UploadTexture, /* 14 */
     (APTR)hw_DrawLine,      /* 15 DrawLine (off 120) */
@@ -620,7 +716,10 @@ static const APTR _main_Vectors[] __attribute__((used)) =
     (APTR)hw_SetColorMask,  /* 33 SetColorMask (suite telemetry) */
     (APTR)hw_SetStencilFunc, /* 34 SetStencilFunc (off 196) */
     (APTR)hw_TexEnv, /* 35 tex env / SetTexEnv (off 0xc8) -- records per-tex mode */
-    (APTR)hw_s36, /* 36 (was DrawTriStrip: mis-mapped) */
+    (APTR)hw_TexWrap, /* 36 SetWrapMode -- REAL slot per off 0xcc=(204-60)/4=36;
+                       * the idx-32 wiring never fired (Q2 census: 510 NOOP hits
+                       * here = one per texture = GL_REPEAT dropped = smeared
+                       * world textures, 2026-07-09) */
     (APTR)hw_SetZCompare, /* 37 SetZCompareMode (base 60, off 208) */
     (APTR)hw_TexRealize, /* 38 texture realize/upload (AllocTexObj, off 0xd4) */
     (APTR)hw_s39,

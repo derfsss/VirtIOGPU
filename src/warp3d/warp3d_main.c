@@ -325,10 +325,27 @@ static uint32 w3d_blendfactor(uint32 w)
     }
 }
 
-#define W3D_HANDLE_BLEND_OPAQUE  310   /* COLORMASK only, no blend (+313 twin) */
-#define W3D_HANDLE_BLEND_FUNC    311   /* app's W3D_SetBlendMode factors (+312 twin) */
-#define W3D_HANDLE_DSA_ALPHA     315   /* depth+alpha-test DSA (+317 twin) */
-#define W3D_HANDLE_RAST          316   /* W3D rasterizer: cull/frontface (+318 twin) */
+/* Per-context object-handle block (soak Bug 1 fix, 2026-07-09).  Every W3D
+ * context gets a UNIQUE 64K handle block inside the shared virgl ctx 1, so no
+ * context can ever create over / destroy / bind another context's objects.
+ * Offsets within the block (the old fixed numbers were 300 + offset):
+ *   +0..+2   static depth DSAs (test+write / test / off)
+ *   +10/+13  colormask-only blend twins        +11/+12  app-blend twins
+ *   +15/+17  depth+alpha/stencil DSA twins     +16/+18  rasterizer twins
+ *   +40..    samplers (per-texture, wrap within the block)
+ * Blocks start at 0x20000 -- far above the chip's own handle range.  A
+ * destroyed context deliberately LEAKS its ~7 live state objects in the host
+ * context (tiny, bounded): destroying host-side-bound objects is riskier than
+ * the leak, and unique blocks mean the stale objects can never collide. */
+#define WH_BLOCK_SIZE       0x10000u
+#define WH_OFF_DSA          0
+#define WH_OFF_BLEND_OPAQUE 10   /* twin +13 */
+#define WH_OFF_BLEND_FUNC   11   /* twin +12 */
+#define WH_OFF_DSA_ALPHA    15   /* twin +17 */
+#define WH_OFF_RAST         16   /* twin +18 */
+#define WH_OFF_SAMPLER      40
+
+static uint32 g_w3d_ctx_seq;   /* atomic (SMP policy: no Forbid) */
 
 /* virgl objects are immutable: a state change creates the NEW object on the
  * twin handle, binds it, then destroys the old -- never create over a live
@@ -355,8 +372,8 @@ static void bind_blend(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
                    | VIRGL_BLEND_RT_ALPHA_SRC_FACTOR(s)
                    | VIRGL_BLEND_RT_ALPHA_DST_FACTOR(d)
                    | VIRGL_BLEND_RT_COLORMASK(mask);
-        uint32 nh = handle_flip(wv->blend_func_h, W3D_HANDLE_BLEND_FUNC,
-                                W3D_HANDLE_BLEND_FUNC + 1);
+        uint32 nh = handle_flip(wv->blend_func_h, wv->hbase + WH_OFF_BLEND_FUNC,
+                                wv->hbase + WH_OFF_BLEND_FUNC + 1);
         virgl_cmd_create_blend(cbuf, nh, 0, rt0);
         if (wv->blend_func_h)
             virgl_cmd_destroy_object(cbuf, VIRGL_OBJECT_BLEND, wv->blend_func_h);
@@ -364,8 +381,8 @@ static void bind_blend(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
         wv->blend_funcs_dirty = FALSE;
     }
     if (wv->blend_mask_dirty) {
-        uint32 nh = handle_flip(wv->blend_opaque_h, W3D_HANDLE_BLEND_OPAQUE,
-                                W3D_HANDLE_BLEND_OPAQUE + 3);
+        uint32 nh = handle_flip(wv->blend_opaque_h, wv->hbase + WH_OFF_BLEND_OPAQUE,
+                                wv->hbase + WH_OFF_BLEND_OPAQUE + 3);
         virgl_cmd_create_blend(cbuf, nh, 0, VIRGL_BLEND_RT_COLORMASK(mask));
         if (wv->blend_opaque_h)
             virgl_cmd_destroy_object(cbuf, VIRGL_OBJECT_BLEND, wv->blend_opaque_h);
@@ -377,7 +394,7 @@ static void bind_blend(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
 }
 
 /* Bind the DSA for the current depth + alpha-test + stencil state.  Without
- * alpha test or stencil the three static objects (300/301/302) cover every
+ * alpha test or stencil the three static objects (hbase+0/1/2) cover every
  * depth combination; otherwise a dynamic object carries depth bits + alpha
  * func/ref + the single-face stencil word (twin-handle recreate only when
  * the effective state actually changed). */
@@ -408,8 +425,8 @@ static void bind_dsa(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
         if (!wv->dsa_alpha_h || s0 != wv->dsa_alpha_s0 ||
             s1 != wv->dsa_alpha_s1 ||
             (alpha && wv->alpha_ref != wv->dsa_alpha_ref)) {
-            uint32 nh = handle_flip(wv->dsa_alpha_h, W3D_HANDLE_DSA_ALPHA,
-                                    W3D_HANDLE_DSA_ALPHA + 2);
+            uint32 nh = handle_flip(wv->dsa_alpha_h, wv->hbase + WH_OFF_DSA_ALPHA,
+                                    wv->hbase + WH_OFF_DSA_ALPHA + 2);
             /* W3D stencil is single-face: back (S2) mirrors front (S1) */
             virgl_cmd_create_dsa(cbuf, nh, s0, s1, s1, wv->alpha_ref);
             if (wv->dsa_alpha_h)
@@ -424,7 +441,8 @@ static void bind_dsa(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
             virgl_cmd_set_stencil_ref(cbuf, wv->st_ref, wv->st_ref);
     } else {
         virgl_cmd_bind_object(cbuf, VIRGL_OBJECT_DSA,
-            wv->depth_test ? (wv->depth_write ? 300 : 301) : 302);
+            wv->hbase + WH_OFF_DSA +
+            (wv->depth_test ? (wv->depth_write ? 0 : 1) : 2));
     }
 }
 
@@ -526,6 +544,12 @@ static uint32 tex_sampler(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv,
                   | VIRGL_SAMPLER_S0_MIN_MIP_FILTER(PIPE_TEX_MIPFILTER_NONE)
                   | VIRGL_SAMPLER_S0_MAG_IMG_FILTER(fmag);
         uint32 nh = wv->sampler_next++;
+        if (nh >= wv->hbase + WH_BLOCK_SIZE - 8) {
+            /* wrap within the context's block: a texture holds ONE live
+             * sampler, so reuse only collides after ~64K live textures */
+            wv->sampler_next = wv->hbase + WH_OFF_SAMPLER;
+            nh = wv->sampler_next++;
+        }
         virgl_cmd_create_sampler_state(cbuf, nh, s0, 0.0f, 0.0f, 0.0f,
                                        ti->border[0], ti->border[1],
                                        ti->border[2], ti->border[3]);
@@ -552,8 +576,8 @@ static void bind_rasterizer(struct VirglCmdBuf *cbuf, struct W3DVirgl *wv)
               | VIRGL_RS_S0_FRONT_CCW(wv->front_ccw ? 1 : 0);
     if (!wv->rast_h || s0 != wv->rast_s0 ||
         wv->point_size != wv->rast_psize || wv->line_width != wv->rast_lwidth) {
-        uint32 nh = handle_flip(wv->rast_h, W3D_HANDLE_RAST,
-                                W3D_HANDLE_RAST + 2);
+        uint32 nh = handle_flip(wv->rast_h, wv->hbase + WH_OFF_RAST,
+                                wv->hbase + WH_OFF_RAST + 2);
         virgl_cmd_create_rasterizer(cbuf, nh, s0, wv->point_size, 0, 0,
                                     wv->line_width, 0.0f, 0.0f, 0.0f);
         if (wv->rast_h)
@@ -790,24 +814,30 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
     /* Shared depth buffer + a depth-test DSA (LESS, write enabled) so the cow
      * surfaces occlude correctly regardless of triangle draw order. */
     wv->depth_test = TRUE; wv->depth_write = TRUE;
+    /* Unique per-context handle block (Bug 1 fix -- see WH_* above).
+     * __sync atomic per the SMP policy; 32K blocks before the sequence
+     * wraps, far beyond any realistic context churn. */
+    wv->hbase = WH_BLOCK_SIZE *
+        (2u + (__sync_add_and_fetch(&g_w3d_ctx_seq, 1) & 0x7FFFu));
+
     if (g_IV3D->AllocDepthBuffer(g_IV3D, wv->info.token, wv->fb_w, wv->fb_h,
                                  &wv->zres, &wv->zsurf)) {
         uint32 dw[48]; struct VirglCmdBuf dcb;
-        wv->dsa_handle = 300;       /* warp3d object handle range (>= chip's) */
+        wv->dsa_handle = wv->hbase + WH_OFF_DSA;  /* non-zero = DSAs exist */
         virgl_cmd_init(&dcb, dw, 48);
-        /* 300 = test+write (LESS), 301 = test, no write, 302 = depth OFF.
-         * bind_rt_framebuffer picks one per draw from depth_test/depth_write. */
-        virgl_cmd_create_dsa(&dcb, 300,
+        /* +0 = test+write (LESS), +1 = test, no write, +2 = depth OFF.
+         * bind_dsa picks one per draw from depth_test/depth_write. */
+        virgl_cmd_create_dsa(&dcb, wv->hbase + WH_OFF_DSA + 0,
             VIRGL_DSA_S0_DEPTH_ENABLE(1) | VIRGL_DSA_S0_DEPTH_WRITEMASK(1) |
             VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_LESS), 0, 0, 0.0f);
-        virgl_cmd_create_dsa(&dcb, 301,
+        virgl_cmd_create_dsa(&dcb, wv->hbase + WH_OFF_DSA + 1,
             VIRGL_DSA_S0_DEPTH_ENABLE(1) | VIRGL_DSA_S0_DEPTH_WRITEMASK(0) |
             VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_LESS), 0, 0, 0.0f);
-        /* 302 = "depth off": well-formed as test-ENABLED + func ALWAYS + no write
+        /* +2 = "depth off": well-formed as test-ENABLED + func ALWAYS + no write
          * (a bare DEPTH_ENABLE(0)/s0=0 left the Cosmos overlay invisible -- some
          * virglrenderer paths mishandle the all-zero DSA).  ALWAYS passes every
          * fragment, WRITEMASK(0) leaves the depth buffer intact. */
-        virgl_cmd_create_dsa(&dcb, 302,
+        virgl_cmd_create_dsa(&dcb, wv->hbase + WH_OFF_DSA + 2,
             VIRGL_DSA_S0_DEPTH_ENABLE(1) | VIRGL_DSA_S0_DEPTH_WRITEMASK(0) |
             VIRGL_DSA_S0_DEPTH_FUNC(PIPE_FUNC_ALWAYS), 0, 0, 0.0f);
         g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id, dcb.buf, dcb.dwords);
@@ -824,13 +854,13 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
          * private objects yet (twin-handle recreate builds them on demand) */
         wv->color_mask = 0xF;
         wv->blend_mask_dirty = FALSE;
-        wv->blend_opaque_h = W3D_HANDLE_BLEND_OPAQUE;
-        wv->blend_func_h   = W3D_HANDLE_BLEND_FUNC;
+        wv->blend_opaque_h = wv->hbase + WH_OFF_BLEND_OPAQUE;
+        wv->blend_func_h   = wv->hbase + WH_OFF_BLEND_FUNC;
         wv->alpha_func = 0; wv->alpha_ref = 0.0f; wv->alpha_on = FALSE;
         wv->dsa_alpha_h = 0;
         wv->cull_on = FALSE; wv->front_ccw = TRUE;
         wv->rast_h = 0;
-        wv->sampler_next = 340;
+        wv->sampler_next = wv->hbase + WH_OFF_SAMPLER;
         wv->fog_on = FALSE; wv->fog_mode = 0;
         wv->fog_start = 0.0f; wv->fog_end = 1.0f; wv->fog_density = 1.0f;
         wv->fog_color[0] = wv->fog_color[1] = wv->fog_color[2] = 0.0f;
@@ -842,8 +872,9 @@ W3D_Context *w3d_CreateContext(struct Warp3DIFace *Self, uint32 *error,
         wv->point_size = 1.0f; wv->line_width = 1.0f;
         wv->rast_psize = 0.0f; wv->rast_lwidth = 0.0f;
         virgl_cmd_init(&bcb, bw2, 64);
-        virgl_cmd_create_blend(&bcb, W3D_HANDLE_BLEND_OPAQUE, 0, VIRGL_BLEND_RT_OPAQUE);
-        virgl_cmd_create_blend(&bcb, W3D_HANDLE_BLEND_FUNC, 0,
+        virgl_cmd_create_blend(&bcb, wv->hbase + WH_OFF_BLEND_OPAQUE, 0,
+                               VIRGL_BLEND_RT_OPAQUE);
+        virgl_cmd_create_blend(&bcb, wv->hbase + WH_OFF_BLEND_FUNC, 0,
             VIRGL_BLEND_RT_BLEND_ENABLE(1)
             | VIRGL_BLEND_RT_RGB_FUNC(PIPE_BLEND_ADD)
             | VIRGL_BLEND_RT_RGB_SRC_FACTOR(PIPE_BLENDFACTOR_ONE)

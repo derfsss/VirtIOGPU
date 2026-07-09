@@ -79,6 +79,14 @@ struct W3DVirgl {
                                      * cleared by frame_present.  Drives the
                                      * WaitIdle/CheckIdle/Flush present hooks for
                                      * clients that never call FlushFrame (MiniGL) */
+    uint32 hbase;                   /* per-context virgl object-handle block base
+                                     * (64K handles).  All W3D contexts share virgl
+                                     * ctx 1, so FIXED handle numbers collide across
+                                     * contexts: one context's twin-flip DESTROYS a
+                                     * handle another live context still binds ->
+                                     * Illegal handle + DRAW_VBO 127 and the host
+                                     * context is poisoned for good (soak Bug 1,
+                                     * 2026-07-09).  Unique blocks kill the class. */
 
     /* Shared depth buffer + depth-test DSA (for correct occlusion).  Three DSA
      * variants are pre-created so W3D_SetState(ZBUFFER/ZBUFFERUPDATE) can toggle

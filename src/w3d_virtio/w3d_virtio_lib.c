@@ -471,6 +471,32 @@ static uint32 hw_SetStateFn(APTR Self, W3D_Context *ctx, uint32 state, uint32 ac
      * (the cow's 256x256 -> "Cant create wtexture").  (W3D states are small values, no
      * overlap with the 0x6f..0x72 query selectors.) */
     if (state >= 0x6f && state <= 0x72) return 2048;
+    /* Query-selector census (multitexture recon, 2026-07-09): W3D_Query and
+     * W3D_SetState share this vector; selectors above the W3D state-bit range
+     * are queries (the 0x6f..0x72 maxtex ones above are known).  Log each
+     * DISTINCT high selector once so MiniGL's capability negotiation
+     * (W3D_Q_NUM_TMU / ENV_* etc.) becomes visible on serial. */
+    if (state >= 0x40) {
+        static volatile uint32 q_seen[32];
+        int i; BOOL log_it = FALSE;
+        for (i = 0; i < 32; i++) {
+            if (q_seen[i] == state) break;              /* already logged */
+            if (q_seen[i] == 0) { q_seen[i] = state; log_it = TRUE; break; }
+        }   /* table full + unseen: stay silent (dedup overflow once
+             * produced 1.3MB of repeat lines -- 2026-07-09) */
+        if (log_it)
+            DBP("query/state selector 0x%lx (action/dest=0x%lx) -> "
+                "SetState passthrough\n",
+                (unsigned long)state, (unsigned long)action);
+    }
+    /* Multitexture negotiation (recon 2026-07-09): MiniGL asks NUM_TMU(0xAA)
+     * NUM_BLEND(0xAB) ENV_COMBINE(0xAC) ENV_ADD(0xAD) ENV_CROSSBAR(0xAF)
+     * through THIS vector; the SetState passthrough returns 0 = "0 TMUs" =
+     * multitexture correctly gated OFF.  DO NOT answer NUM_TMU > 0 until the
+     * backend dual-texture render path exists (chip dual-tex shaders +
+     * TCOORD_1 gather + SetTextureBlend), or MiniGL will USE it and break
+     * rendering.  When the path lands: 0xAA/0xAB -> 2, 0xAC/0xAF ->
+     * W3D_NOT_SUPPORTED(5) (combined model only), 0xAD per shader support. */
     return w3d_SetState((struct Warp3DIFace *)0, ctx, state, action);
 }
 /* SetZCompareMode(ctx, mode) at off 208 (idx 37).  Was "accept and ignore"

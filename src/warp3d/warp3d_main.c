@@ -1811,6 +1811,75 @@ static APTR tex_to_rgba(APTR image, uint32 w, uint32 h, uint32 fmt, APTR *scratc
     return dst;
 }
 
+/* Re-upload an already-realized texture from tex->texsource.  Both
+ * W3D_UpdateTexImage (FE dispatch: backend off 212 = the realize slot 38)
+ * and W3D_UpdateTexSubImage (off 280 = slot 55) land here: the FE keeps
+ * texsource current (it copies the sub-rect in before dispatching), so a
+ * full re-upload is always correct -- and for the 128x128 lightmap pages
+ * that dominate this path, cheap enough.  No V3D update op exists, so
+ * free + recreate; the per-draw sampler-view bind picks up the new view
+ * on the next draw. */
+uint32 w3d_UpdateTexture(W3D_Context *ctx, W3D_Texture *tex)
+{
+    struct W3DTexInfo *ti;
+    struct W3DVirgl   *wv;
+    uint32 new_view = 0, new_res = 0;
+    static uint32 upd_count = 0;
+    uint32 n;
+
+    if (!ctx || !ctx->driver || !tex || !tex->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    ti = tex->driver;
+    if (ti->magic != W3DTEX_MAGIC) return W3D_ILLEGALINPUT;
+    if (!tex->texsource) return W3D_ILLEGALINPUT;
+
+    {
+        APTR scratch = NULL;
+        APTR up = tex_to_rgba(tex->texsource, ti->w, ti->h,
+                              (uint32)tex->texfmtsrc, &scratch);
+        BOOL ok = up && g_IV3D->CreateTexture(g_IV3D, wv->info.token,
+                                              ti->w, ti->h, up, ti->w * 4,
+                                              &new_view, &new_res);
+        if (scratch) IExec->FreeVec(scratch);
+        if (!ok) {
+            DW3D("UpdateTexture: re-upload FAILED tex=%p %lux%lu fmt=%ld\n",
+                 (void *)tex, (unsigned long)ti->w, (unsigned long)ti->h,
+                 (long)tex->texfmtsrc);
+            return W3D_NOMEMORY;   /* old texture stays valid */
+        }
+    }
+    g_IV3D->FreeTexture(g_IV3D, wv->info.token, ti->res, ti->view);
+    ti->res  = new_res;
+    ti->view = new_view;
+    n = ++upd_count;
+    if (n <= 4 || (n & 0xFF) == 0)   /* per-frame for lightmaps: rate-limit */
+        DW3D("UpdateTexture: tex=%p %lux%lu re-uploaded (update %lu)\n",
+             (void *)tex, (unsigned long)ti->w, (unsigned long)ti->h,
+             (unsigned long)n);
+    return W3D_SUCCESS;
+}
+
+/* W3D_GetTexFmtInfo (FE slot 39): which source formats can this driver
+ * take, and how fast.  The old stub returned 0 -- an INCOHERENT answer
+ * (neither SUPPORTED nor UNSUPPORTED bit set) to the 14 per-format
+ * queries MiniGL makes at startup; honest caps are a prerequisite for
+ * clients enabling their texture paths.  tex_to_rgba converts formats
+ * 2..11; CHUNKY needs a palette we don't handle and the compressed
+ * trio can't be converted. */
+uint32 w3d_GetTexFmtInfo(W3D_Context *ctx, uint32 format, uint32 destfmt)
+{
+    (void)ctx; (void)destfmt;
+    switch (format) {
+    case W3D_A1R5G5B5: case W3D_R5G6B5:   case W3D_R8G8B8:
+    case W3D_A4R4G4B4: case W3D_A8R8G8B8: case W3D_A8:
+    case W3D_L8:       case W3D_L8A8:     case W3D_I8:
+    case W3D_R8G8B8A8:
+        return W3D_TEXFMT_SUPPORTED | W3D_TEXFMT_FAST | W3D_TEXFMT_ARGBFAST;
+    default:
+        return W3D_TEXFMT_UNSUPPORTED;
+    }
+}
+
 /* Realize a FE-built W3D_Texture.  The stock Warp3D.library FE allocates+fills
  * the W3D_Texture itself (parses the ATO tags into texsource/texwidth/texheight)
  * then calls the backend's off-0xd4 slot to UPLOAD it -- it never calls a tag-
@@ -1827,7 +1896,16 @@ uint32 w3d_RealizeTexture(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Textur
 
     if (!ctx || !ctx->driver || !tex) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
-    if (tex->driver) return W3D_SUCCESS;        /* already realized -- idempotent */
+    if (tex->driver)                            /* already realized: this is an
+                                                 * UPDATE (the FE routes
+                                                 * W3D_UpdateTexImage to this
+                                                 * same slot 38) -- re-upload.
+                                                 * The old early-return made
+                                                 * every texture update a
+                                                 * silent no-op (Q2 dynamic
+                                                 * lightmap garbage,
+                                                 * 2026-07-09). */
+        return w3d_UpdateTexture(ctx, tex);
 
     image = tex->texsource;
     w     = (uint32)tex->texwidth;

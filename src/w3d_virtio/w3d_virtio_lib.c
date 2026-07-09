@@ -316,9 +316,9 @@ static uint32 hw_dispatch(long slot, uint32 a, uint32 b, uint32 c, uint32 d, uin
 HWSTUB(4)  HWSTUB(5)  HWSTUB(6)  HWSTUB(7)  HWSTUB(8)  HWSTUB(9)
 HWSTUB(10) HWSTUB(12) HWSTUB(13) HWSTUB(14) HWSTUB(15) HWSTUB(16) HWSTUB(17) HWSTUB(18) HWSTUB(19)
 HWSTUB(20) HWSTUB(21) HWSTUB(22) HWSTUB(23) HWSTUB(24) HWSTUB(25) HWSTUB(26) HWSTUB(27) HWSTUB(28) HWSTUB(29)
-HWSTUB(30) HWSTUB(31) HWSTUB(32) HWSTUB(33) HWSTUB(34) HWSTUB(35) HWSTUB(37) HWSTUB(38) HWSTUB(39)
+HWSTUB(30) HWSTUB(31) HWSTUB(32) HWSTUB(33) HWSTUB(34) HWSTUB(35) HWSTUB(37) HWSTUB(38)
 HWSTUB(40) HWSTUB(41) HWSTUB(42) HWSTUB(43) HWSTUB(44) HWSTUB(45) HWSTUB(46) HWSTUB(47) HWSTUB(48) HWSTUB(49)
-HWSTUB(50) HWSTUB(51) HWSTUB(52) HWSTUB(53) HWSTUB(54) HWSTUB(55) HWSTUB(56) HWSTUB(57) HWSTUB(58) HWSTUB(59)
+HWSTUB(50) HWSTUB(51) HWSTUB(52) HWSTUB(53) HWSTUB(54) HWSTUB(56) HWSTUB(57) HWSTUB(58) HWSTUB(59)
 HWSTUB(60) HWSTUB(61) HWSTUB(62) HWSTUB(63) HWSTUB(64) HWSTUB(65) HWSTUB(66) HWSTUB(67) HWSTUB(68)
 HWSTUB(70) HWSTUB(71) HWSTUB(72) HWSTUB(74) HWSTUB(75) HWSTUB(77) HWSTUB(78)
 HWSTUB(80) HWSTUB(81) HWSTUB(82) HWSTUB(83) HWSTUB(84) HWSTUB(85) HWSTUB(86) HWSTUB(87)
@@ -515,6 +515,30 @@ static uint32 hw_TexRealize(APTR Self, W3D_Context *ctx, W3D_Texture *tex,
     (void)Self; (void)zero; (void)maxmip;
     if (!get_wv(ctx)) return (uint32)W3D_ILLEGALINPUT;
     return w3d_RealizeTexture((struct Warp3DIFace *)0, ctx, tex);
+}
+/* slot 55 (off 280, RE-confirmed in _Warp3D_W3D_UpdateTexSubImage @0x68fc) =
+ * the sub-image update dispatch.  The FE copies the sub-rect into
+ * tex->texsource BEFORE dispatching, so a full re-upload from texsource is
+ * always correct.  Was a silent NOOP (Q2 dynamic lightmap garbage). */
+static uint32 hw_UpdateTexSub(APTR Self, W3D_Context *ctx, W3D_Texture *tex,
+                              uint32 c, uint32 d)
+{
+    (void)Self; (void)c; (void)d;
+    if (!get_wv(ctx)) return 0;
+    if ((uint32)(APTR)tex < 0x10000000 || (uint32)(APTR)tex >= 0x80000000)
+        return (uint32)W3D_ILLEGALINPUT;
+    return w3d_UpdateTexture(ctx, tex);
+}
+/* slot 39 (map GetTexFmtInfo; 14 calls at MiniGL startup = one per format).
+ * Args observed/RE: (ctx, format, destfmt).  The stub's 0 answer was
+ * incoherent (neither SUPPORTED nor UNSUPPORTED). */
+static uint32 hw_GetTexFmtInfo(APTR Self, W3D_Context *ctx, uint32 format,
+                               uint32 destfmt, uint32 d)
+{
+    (void)Self; (void)d;
+    DBP("slot39 GetTexFmtInfo fmt=%lu destfmt=%lu\n",
+        (unsigned long)format, (unsigned long)destfmt);
+    return w3d_GetTexFmtInfo(ctx, format, destfmt);
 }
 /* slot 30 (off 0xb4) = filter dispatch: the AllocTexObj filter sub-call AND
  * W3D_SetFilter(ctx, tex, min, mag) both land here.  Recorded per-texture;
@@ -722,14 +746,16 @@ static const APTR _main_Vectors[] __attribute__((used)) =
                        * world textures, 2026-07-09) */
     (APTR)hw_SetZCompare, /* 37 SetZCompareMode (base 60, off 208) */
     (APTR)hw_TexRealize, /* 38 texture realize/upload (AllocTexObj, off 0xd4) */
-    (APTR)hw_s39,
+    (APTR)hw_GetTexFmtInfo, /* 39 GetTexFmtInfo (honest caps; was stub->0) */
     (APTR)hw_DrawTriStrip, /* 40 */ (APTR)hw_DrawTriFan, /* 41 */ (APTR)hw_s42, (APTR)hw_s43,
     (APTR)hw_LockHW, /* 44 LockHardware (ack) */ (APTR)hw_UnLockHW, /* 45 UnLockHardware (ack) */
     (APTR)hw_s46,
     (APTR)hw_SetStencilOp,  /* 47 SetStencilOp (off 248) */
     (APTR)hw_SetWriteMask,  /* 48 SetWriteMask (off 252) */
     (APTR)hw_s49, (APTR)hw_s50, (APTR)hw_s51,
-    (APTR)hw_s52, (APTR)hw_s53, (APTR)hw_s54, (APTR)hw_s55, (APTR)hw_s56,
+    (APTR)hw_s52, (APTR)hw_s53, (APTR)hw_s54,
+    (APTR)hw_UpdateTexSub,  /* 55 UpdateTexSubImage (was silent NOOP) */
+    (APTR)hw_s56,
     (APTR)hw_s57,           /* 57 identify -> 0x48aa (keep) */
     (APTR)hw_SetDrawRegion, /* 58 SetDrawRegion (ack; GFXdriver does the real lock) */
     (APTR)hw_s59, (APTR)hw_s60,

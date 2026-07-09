@@ -231,6 +231,8 @@ W3D_Driver **w3d_GetDrivers(struct Warp3DIFace *Self);
 uint32       w3d_ClearBuffers(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Color *color, W3D_Double *depth, uint32 *stencil);
 uint32       w3d_ClearZBuffer(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Double *clearvalue);
 uint32       w3d_SetZCompareMode(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 mode);
+uint32       w3d_UpdateTexture(W3D_Context *ctx, W3D_Texture *tex);
+uint32       w3d_GetTexFmtInfo(W3D_Context *ctx, uint32 format, uint32 destfmt);
 void         w3d_DestroyContext(struct Warp3DIFace *Self, W3D_Context *ctx);
 uint32       w3d_GetState(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 state);
 uint32       w3d_SetState(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 state, uint32 action);

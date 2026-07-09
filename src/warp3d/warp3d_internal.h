@@ -75,6 +75,10 @@ struct W3DVirgl {
     uint32 rt_surface[2];           /* surface handles (framebuffer bind) */
     uint32 draw_idx;                /* which buffer we currently draw into */
     BOOL   drawn_since_clear;       /* geometry submitted since last frame clear */
+    BOOL   rt_dirty;                /* RT has content the app bitmap hasn't seen --
+                                     * cleared by frame_present.  Drives the
+                                     * WaitIdle/CheckIdle/Flush present hooks for
+                                     * clients that never call FlushFrame (MiniGL) */
 
     /* Shared depth buffer + depth-test DSA (for correct occlusion).  Three DSA
      * variants are pre-created so W3D_SetState(ZBUFFER/ZBUFFERUPDATE) can toggle

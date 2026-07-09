@@ -235,6 +235,7 @@ static void frame_present(struct W3DVirgl *wv, struct BitMap *bm)
                                   pw, ph, base, bpr);
         g_ICyberGfx->UnLockBitMap(lock);
     }
+    wv->rt_dirty = FALSE;
 }
 
 /* Dependency-free tag scan (GetTagData lives in IUtility, which we don't
@@ -595,6 +596,7 @@ static void frame_clear(struct W3DVirgl *wv, uint32 argb)
      * the clear is deferred and emitted with the next draw (one atomic submit). */
     wv->drawn_since_clear = FALSE;
     wv->pending_clear = TRUE;
+    wv->rt_dirty      = TRUE;   /* a clear-only frame must still reach the bitmap */
     wv->clear_argb    = argb;
 }
 
@@ -1031,6 +1033,15 @@ void w3d_WaitIdle(struct Warp3DIFace *Self, W3D_Context *ctx)
      * so the cursor doesn't freeze. */
     if (!ctx || !ctx->driver) return;
     wv = ctx->driver;
+    /* Classic contract: after WaitIdle the BITMAP contains the pixels (classic
+     * HW rendered straight to VRAM).  MiniGL presents by blitting the bitmap
+     * itself and NEVER calls FlushFrame (2026-07-09 Quake2 census: 0 calls) --
+     * materialize the RT here when it has unseen content. */
+    if (wv->rt_dirty || wv->pending_clear) {
+        DW3D("WaitIdle: present (rt_dirty=%ld pending_clear=%ld)\n",
+             (long)wv->rt_dirty, (long)wv->pending_clear);
+        w3d_FlushFrame(Self, ctx);
+    }
     if (wv->timer_io) {
         struct TimeRequest *tr = (struct TimeRequest *)wv->timer_io;
         tr->Request.io_Command = TR_ADDREQUEST;
@@ -1039,7 +1050,20 @@ void w3d_WaitIdle(struct Warp3DIFace *Self, W3D_Context *ctx)
         IExec->DoIO((struct IORequest *)tr);
     }
 }
-uint32 w3d_CheckIdle(struct Warp3DIFace *Self, W3D_Context *ctx)    { (void)Self; (void)ctx; return TRUE; }
+uint32 w3d_CheckIdle(struct Warp3DIFace *Self, W3D_Context *ctx)
+{
+    /* Same bitmap-materialization contract as WaitIdle: a client that polls
+     * CheckIdle before touching the bitmap must see the pixels. */
+    if (ctx && ctx->driver) {
+        struct W3DVirgl *wv = ctx->driver;
+        if (wv->rt_dirty || wv->pending_clear) {
+            DW3D("CheckIdle: present (rt_dirty=%ld pending_clear=%ld)\n",
+                 (long)wv->rt_dirty, (long)wv->pending_clear);
+            w3d_FlushFrame(Self, ctx);
+        }
+    }
+    return TRUE;
+}
 
 uint32 w3d_SetBlendMode(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 s, uint32 d)
 {
@@ -1355,32 +1379,75 @@ uint32 w3d_ColorPointer(struct Warp3DIFace *Self, W3D_Context *ctx,
     return W3D_SUCCESS;
 }
 
-/* M1 DrawArray: treats the bound vertex pointer as an array of W3D_Vertex
- * (the common case; full vertex-format decode is a later milestone).  Caps at
- * what the shared 256-byte vbuf holds (8 verts of stride 32). */
+/* DrawArray: sequential-index draw over the SAME gather view DrawElements
+ * uses (interleaved array OR the separate V4 pointers).  The MiniGL frame
+ * path is W3D_InterleavedArray + W3D_DrawArray; the previous version only
+ * consumed the backend-slot W3D_Vertex pointer and returned ILLEGALINPUT
+ * (silently -- no log line) for that pattern, which was the 2026-07-09
+ * soak's grey-window root cause (Quake2/gears68k: geometry flowed, every
+ * draw was rejected, and the deferred clear never executed either).
+ * Reproducer: src/tools/w3d_present.c (default mode).  The legacy
+ * W3D_Vertex path survives as a fallback for callers of the backend's own
+ * VertexPointer slot (still M1-capped at 8 verts -- draw_packed's vbuf). */
+static uint32 draw_gather_setup(W3D_Context *ctx, struct W3DVirgl *wv);
+static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
+                                uint32 idx_size, uint32 first, uint32 nverts,
+                                uint32 pipe_prim);
+
 uint32 w3d_DrawArray(struct Warp3DIFace *Self, W3D_Context *ctx,
                      uint32 prim, uint32 base, uint32 count)
 {
     struct W3DVirgl *wv;
-    float verts[64];          /* 8 verts * 8 floats */
-    uint32 i;
+    uint32 pipe_prim, done, CHUNK;
     (void)Self;
 
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
-    if (!wv->vtx_ptr || count == 0) return W3D_ILLEGALINPUT;
-    if (count > 8) {
-        DW3D("DrawArray: count %lu > 8 (M1 vbuf cap) -- clamped\n",
-             (unsigned long)count);
-        count = 8;
+    if (count == 0) {
+        DW3D("DrawArray: ILLEGALINPUT (count=0)\n");
+        return W3D_ILLEGALINPUT;
     }
 
-    for (i = 0; i < count; i++) {
-        const W3D_Vertex *v = (const W3D_Vertex *)
-            (wv->vtx_ptr + (base + i) * (uint32)wv->vtx_stride);
-        pack_vertex(&verts[i * 8], v, (float)wv->fb_w, (float)wv->fb_h);
+    CHUNK = draw_gather_setup(ctx, wv);
+    DW3D("DrawArray: prim=%lu base=%lu count=%lu\n",
+         (unsigned long)prim, (unsigned long)base, (unsigned long)count);
+
+    if (!wv->ga_pos) {
+        /* legacy fallback: W3D_Vertex array bound via the backend slot */
+        if (wv->vtx_ptr) {
+            float verts[64];          /* 8 verts * 8 floats */
+            uint32 i;
+            if (count > 8) {
+                DW3D("DrawArray: legacy path count %lu > 8 (M1 vbuf cap) -- clamped\n",
+                     (unsigned long)count);
+                count = 8;
+            }
+            for (i = 0; i < count; i++) {
+                const W3D_Vertex *v = (const W3D_Vertex *)
+                    (wv->vtx_ptr + (base + i) * (uint32)wv->vtx_stride);
+                pack_vertex(&verts[i * 8], v, (float)wv->fb_w, (float)wv->fb_h);
+            }
+            return draw_packed(wv, verts, count, w3d_pipe_prim(prim));
+        }
+        DW3D("DrawArray: ILLEGALINPUT (no vertex source: no interleaved "
+             "array, no V4 VertexPointer, no legacy vtx_ptr)\n");
+        return W3D_ILLEGALINPUT;
     }
-    return draw_packed(wv, verts, count, w3d_pipe_prim(prim));
+    if (!wv->cmdbuf) return W3D_NOMEMORY;
+
+    pipe_prim = w3d_pipe_prim(prim);
+    for (done = 0; done < count; done += CHUNK) {
+        uint32 n = count - done;
+        if (n > CHUNK) n = CHUNK;
+        if (!draw_elements_chunk(wv, NULL, 0, base + done, n, pipe_prim)) {
+            DW3D("DrawArray: chunk submit failed at %lu/%lu\n",
+                 (unsigned long)done, (unsigned long)count);
+            return (uint32)-1;
+        }
+        wv->drawn_since_clear = TRUE;
+        wv->rt_dirty = TRUE;
+    }
+    return W3D_SUCCESS;
 }
 
 /* ----------------------------------------------------------------------- */
@@ -1776,7 +1843,9 @@ uint32 w3d_InterleavedArray(struct Warp3DIFace *Self, W3D_Context *ctx,
 }
 
 /* Emit a chunk of gathered, screen->NDC-converted vertices into cbuf as an
- * INLINE_WRITE, then bind vbuf + draw.  Returns FALSE on submit failure. */
+ * INLINE_WRITE, then bind vbuf + draw.  Returns FALSE on submit failure.
+ * idx_base == NULL means SEQUENTIAL indices (DrawArray): vertex i of the
+ * chunk is gather index first+i. */
 static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
                                 uint32 idx_size, uint32 first, uint32 nverts,
                                 uint32 pipe_prim)
@@ -1869,7 +1938,8 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
         uint32 idx;
         const UBYTE *vp, *cp, *tp, *fp;
         float x, y, z;
-        if      (idx_size == 4) idx = ((const uint32 *)idx_base)[first + i];
+        if      (!idx_base)     idx = first + i;   /* DrawArray: sequential */
+        else if (idx_size == 4) idx = ((const uint32 *)idx_base)[first + i];
         else if (idx_size == 2) idx = ((const UWORD  *)idx_base)[first + i];
         else                    idx = ((const UBYTE  *)idx_base)[first + i];
         /* gather view: interleaved array or the separate V4 pointers */
@@ -1947,15 +2017,13 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
                           cbuf.buf, cbuf.dwords);
 }
 
-uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
-                        uint32 prim, uint32 type, uint32 count, void *indices)
+/* Shared per-draw prologue for DrawElements AND DrawArray: read the FE's
+ * live state bits out of the public context, resolve the gather view
+ * (interleaved array or the separate V4 pointers), and return the submit
+ * chunk size.  Leaves wv->ga_pos NULL when there is no vertex source. */
+static uint32 draw_gather_setup(W3D_Context *ctx, struct W3DVirgl *wv)
 {
-    struct W3DVirgl *wv;
-    uint32 idx_size, pipe_prim, done, CHUNK;
-    (void)Self;
-
-    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
-    wv = ctx->driver;
+    uint32 CHUNK;
     /* The FE tracks the live W3D state bits in ctx+0x1c (W3D_SetState only hands the
      * backend a per-state selector, not the enable/disable -- that lives here).  Read
      * it per-draw to drive the depth-test/write + blend DSA selection.  This is how
@@ -2053,8 +2121,25 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
              (wv->texenv_mode == W3D_REPLACE) ? "narrow" : "WIDE");
         wv->texenv_mode_logged = wv->texenv_mode;
     }
+    return CHUNK;
+}
+
+uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
+                        uint32 prim, uint32 type, uint32 count, void *indices)
+{
+    struct W3DVirgl *wv;
+    uint32 idx_size, pipe_prim, done, CHUNK;
+    (void)Self;
+
+    if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
+    wv = ctx->driver;
+    CHUNK = draw_gather_setup(ctx, wv);
     DW3D("DrawElements: prim=%lu count=%lu\n", (unsigned long)prim, (unsigned long)count);
-    if (!wv->ga_pos || !indices || count == 0) return W3D_ILLEGALINPUT;
+    if (!wv->ga_pos || !indices || count == 0) {
+        DW3D("DrawElements: ILLEGALINPUT (ga_pos=%p indices=%p count=%lu)\n",
+             (const void *)wv->ga_pos, (void *)indices, (unsigned long)count);
+        return W3D_ILLEGALINPUT;
+    }
     if (!wv->cmdbuf) return W3D_NOMEMORY;
 
     idx_size  = (type == W3D_INDEX_ULONG) ? 4 : (type == W3D_INDEX_UWORD) ? 2 : 1;
@@ -2095,6 +2180,7 @@ uint32 w3d_DrawElements(struct Warp3DIFace *Self, W3D_Context *ctx,
             return (uint32)-1;
         }
         wv->drawn_since_clear = TRUE;
+        wv->rt_dirty = TRUE;
     }
     return W3D_SUCCESS;
 }
@@ -2170,6 +2256,14 @@ uint32 w3d_Flush(struct Warp3DIFace *Self, W3D_Context *ctx)
         }
         wv->pending_clear = FALSE;
     }
+    /* Classic contract: Flush means "the submitted work is now observable" --
+     * clients (MiniGL) blit the bitmap themselves right after, so materialize
+     * the RT into it when it has unseen content (frame_present clears
+     * rt_dirty, making this once-per-frame). */
+    if (wv->rt_dirty) {
+        DW3D("Flush: present (rt_dirty)\n");
+        frame_present(wv, (struct BitMap *)ctx->drawregion);
+    }
     return W3D_SUCCESS;
 }
 
@@ -2178,9 +2272,11 @@ void w3d_FlushFrame(struct Warp3DIFace *Self, W3D_Context *ctx)
     struct W3DVirgl *wv;
     (void)Self;
 
-    w3d_Flush(Self, ctx);            /* finish any pending clear */
+    w3d_Flush(Self, ctx);   /* pending clear + present-if-dirty */
     if (!ctx || !ctx->driver) return;
     wv = ctx->driver;
-    DW3D("FlushFrame: present\n");
-    frame_present(wv, (struct BitMap *)ctx->drawregion);
+    if (wv->rt_dirty) {     /* not already presented by the Flush above */
+        DW3D("FlushFrame: present\n");
+        frame_present(wv, (struct BitMap *)ctx->drawregion);
+    }
 }

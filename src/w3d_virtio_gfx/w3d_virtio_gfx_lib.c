@@ -26,6 +26,8 @@
 #include <dos/dos.h>
 #include <utility/tagitem.h>
 #include <proto/exec.h>
+#include <warp3d/warp3d.h>
+#include <interfaces/warp3d.h>
 
 struct ExecIFace *IExec = NULL;
 
@@ -153,7 +155,46 @@ static uint32 gfx_s3(APTR Self, uint32 a, uint32 b, uint32 c, uint32 d)
     return 2;
 }
 GFXSTUB(2)  GFXSTUB(4)  GFXSTUB(6)  GFXSTUB(7)
-GFXSTUB(8)  GFXSTUB(9)  GFXSTUB(10) GFXSTUB(11) GFXSTUB(12) GFXSTUB(13)
+
+/* vec 8 (off 0x6C): the FE's per-frame call into the GFX driver (runtime
+ * census 2026-07-09: fires ~once per frame for gears68k, Quake2 and
+ * w3d_present, a = W3D_Context, d = stable bitmap-ish pointer; MiniGL
+ * clients call NO backend sync entry point -- FlushFrame/WaitIdle/
+ * CheckIdle/Flush all count 0 in the Quake2 census).  The stock GFX
+ * drivers make the rendered frame observable in the bitmap here; our HW
+ * backend keeps it in a virgl RT until presented -- so route this frame
+ * boundary into the public W3D_FlushFrame, which is present-if-dirty
+ * (cheap no-op when the RT has no unseen content).
+ * Warp3D.library is opened lazily on first use and cached for the
+ * driver's lifetime (we are being CALLED by the FE, so it is loaded).
+ * gfx_s8_busy guards against FE-internal recursion (plain flag, no
+ * Forbid per the SMP policy -- a lost race costs one skipped or doubled
+ * present, both harmless). */
+static struct Warp3DIFace *gfx_IW3D;
+static struct Library     *gfx_W3DBase;
+static volatile LONG       gfx_s8_busy;
+
+static uint32 gfx_s8(APTR Self, uint32 a, uint32 b, uint32 c, uint32 d)
+{
+    (void)Self;
+    DBP("vec 8 (off 0x6C) a=%08lx b=%08lx c=%08lx d=%08lx\n",
+        (unsigned long)a, (unsigned long)b, (unsigned long)c, (unsigned long)d);
+    if (a >= 0x10000000 && a < 0x80000000 && !gfx_s8_busy) {
+        gfx_s8_busy = 1;
+        if (!gfx_IW3D) {
+            gfx_W3DBase = IExec->OpenLibrary("Warp3D.library", 0);
+            if (gfx_W3DBase)
+                gfx_IW3D = (struct Warp3DIFace *)
+                    IExec->GetInterface(gfx_W3DBase, "main", 1, NULL);
+        }
+        if (gfx_IW3D)
+            gfx_IW3D->W3D_FlushFrame((W3D_Context *)a);
+        gfx_s8_busy = 0;
+    }
+    return 0;
+}
+
+GFXSTUB(9)  GFXSTUB(10) GFXSTUB(11) GFXSTUB(12) GFXSTUB(13)
 GFXSTUB(14) GFXSTUB(15) GFXSTUB(16) GFXSTUB(17) GFXSTUB(18) GFXSTUB(19)
 GFXSTUB(20) GFXSTUB(21) GFXSTUB(22) GFXSTUB(23)
 

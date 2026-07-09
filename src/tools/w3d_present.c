@@ -55,6 +55,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <sys/time.h>
 
 #define VW 640
 #define VH 480
@@ -130,8 +131,9 @@ int main(int argc, char **argv)
 {
     struct Library *W3DBase = NULL, *CGXBase = NULL;
     struct Screen  *scr = NULL;
-    BOOL   do_lock = FALSE;
+    BOOL   do_lock = FALSE, no_flush = FALSE;
     int    frames = 300, frame, rc = 20;
+    struct timeval tv_prev, tv_now;
     uint32 err = 0;
     float  ux = 1.0f, uy = 0.0f;            /* rotating unit vector */
     const float RC_ = 0.998630f, RS_ = 0.052336f;   /* 3 deg/frame */
@@ -143,6 +145,8 @@ int main(int argc, char **argv)
             do_lock = TRUE;
         else if (!strcmp(argv[i], "ELEMENTS") || !strcmp(argv[i], "elements"))
             use_elements = TRUE;
+        else if (!strcmp(argv[i], "NOFLUSH") || !strcmp(argv[i], "noflush"))
+            no_flush = TRUE;
         else if (atoi(argv[i]) > 0)
             frames = atoi(argv[i]);
     }
@@ -217,6 +221,7 @@ int main(int argc, char **argv)
     IW3D->W3D_SetState(ctx, W3D_ZBUFFERUPDATE, W3D_DISABLE);
     IW3D->W3D_SetState(ctx, W3D_BLENDING,      W3D_DISABLE);
 
+    gettimeofday(&tv_prev, NULL);
     for (frame = 0; frame < frames; frame++) {
         uint32 drc;
         struct IntuiMessage *msg;
@@ -233,8 +238,10 @@ int main(int argc, char **argv)
         drc = draw_triangle(VW / 2.0f, VH / 2.0f, ux, uy, 180.0f);
         if (drc != W3D_SUCCESS && frame == 0)
             NOTE("draw rc=%lu", (unsigned long)drc);
-        IW3D->W3D_FlushFrame(ctx);
-        IW3D->W3D_WaitIdle(ctx);
+        if (!no_flush) {
+            IW3D->W3D_FlushFrame(ctx);
+            IW3D->W3D_WaitIdle(ctx);
+        }
 
         if (do_lock)
             sync_bitmap();          /* the one-line difference under test */
@@ -244,11 +251,22 @@ int main(int argc, char **argv)
                                      VW, VH, 0xC0);
 
         if ((frame % 60) == 0) {
+            long ms;
+            gettimeofday(&tv_now, NULL);
+            ms = (tv_now.tv_sec - tv_prev.tv_sec) * 1000L +
+                 (tv_now.tv_usec - tv_prev.tv_usec) / 1000L;
             centre = ICyberGfx->ReadRGBPixel(win->RPort,
                                              win->BorderLeft + VW / 2,
                                              win->BorderTop + VH / 2);
-            NOTE("frame %3d: window centre pixel = 0x%08lx",
-                 frame, (unsigned long)centre);
+            if (frame > 0)
+                NOTE("frame %3d: centre=0x%08lx  %ld ms / 60 frames "
+                     "= %ld.%ld ms/frame (%ld.%ld fps)",
+                     frame, (unsigned long)centre, ms,
+                     ms / 60, (ms % 60) * 10 / 60,
+                     ms ? 60000L / ms : 0, ms ? (60000L % ms) * 10 / ms : 0);
+            else
+                NOTE("frame %3d: centre=0x%08lx", frame, (unsigned long)centre);
+            tv_prev = tv_now;
         }
 
         while ((msg = (struct IntuiMessage *)IExec->GetMsg(win->UserPort))) {

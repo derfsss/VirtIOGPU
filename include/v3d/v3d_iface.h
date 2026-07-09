@@ -48,6 +48,11 @@ struct V3DContextInfo {
     uint32 fs_blend_handle;    /* W3D_BLEND FS (env colour in CONST[0])        */
     uint32 ve3_handle;         /* 3-attr vertex elements (stride 48)           */
     uint32 fs_repfog_handle;   /* REPLACE+fog FS (fog colour in CONST[1])      */
+    /* --- Multitexture (W3D V5 combined model; append-only, 2026-07-09).
+     *     Any 0 => not available, backend keeps multitexture gated OFF. --- */
+    uint32 vs_mtex_handle;     /* 4-attr VS (pos+tc0+colour+tc1, stride 64)    */
+    uint32 fs_mtex_mod_handle; /* stage1-MODULATE FS (SAMP[0]*SAMP[1], fog)    */
+    uint32 ve_mtex_handle;     /* 4-attr vertex elements (stride 64)           */
 };
 
 struct V3DIFace {

@@ -761,6 +761,60 @@ void virgl_setup_repfog_fs(struct VirglCmdBuf *cbuf, uint32 handle)
     virgl_cmd_create_shader(cbuf, handle, PIPE_SHADER_FRAGMENT, tgsi_fs_repfog);
 }
 
+/* ===== Multitexture (W3D V5 combined model, 2026-07-09) =====
+ * Stage0 REPLACE + stage1 MODULATE -- the Quake2 single-pass lightmap
+ * pipeline.  4-attr vertex: pos[4]@0, tc0[4]@16 (fog factor rides .z),
+ * colour[4]@32 (carried for future stage modes; ignored by this FS --
+ * stage0 is REPLACE), tc1[4]@48; stride 64.
+ * FS: out = fog_mix(tex0 * tex1) with the standard CONST[1] fog tail. */
+static const char tgsi_vs_mtex[] =
+    "VERT\n"
+    "DCL IN[0]\n"
+    "DCL IN[1]\n"
+    "DCL IN[2]\n"
+    "DCL IN[3]\n"
+    "DCL OUT[0], POSITION\n"
+    "DCL OUT[1], GENERIC[0]\n"
+    "DCL OUT[2], GENERIC[1]\n"
+    "DCL OUT[3], GENERIC[2]\n"
+    "  0: MOV OUT[0], IN[0]\n"
+    "  1: MOV OUT[1], IN[1]\n"
+    "  2: MOV OUT[2], IN[2]\n"
+    "  3: MOV OUT[3], IN[3]\n"
+    "  4: END\n";
+
+static const char tgsi_fs_mtex_mod[] =
+    "FRAG\n"
+    "DCL IN[0], GENERIC[0], PERSPECTIVE\n"
+    "DCL IN[1], GENERIC[1], PERSPECTIVE\n"
+    "DCL IN[2], GENERIC[2], PERSPECTIVE\n"
+    "DCL OUT[0], COLOR\n"
+    "DCL SAMP[0]\n"
+    "DCL SAMP[1]\n"
+    "DCL CONST[0]\n"
+    "DCL CONST[1]\n"
+    "DCL TEMP[0]\n"
+    "DCL TEMP[1]\n"
+    "DCL TEMP[2]\n"
+    "  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n"
+    "  1: TEX TEMP[1], IN[2], SAMP[1], 2D\n"
+    "  2: MUL TEMP[0], TEMP[0], TEMP[1]\n"
+    "  3: LRP TEMP[2].xyz, IN[0].zzzz, TEMP[0], CONST[1]\n"
+    "  4: MOV TEMP[2].w, TEMP[0]\n"
+    "  5: MOV OUT[0], TEMP[2]\n"
+    "  6: END\n";
+
+void virgl_setup_mtex_vs(struct VirglCmdBuf *cbuf, uint32 handle)
+{
+    DCHIP("virgl_setup_mtex_vs: handle=%lu", handle);
+    virgl_cmd_create_shader(cbuf, handle, PIPE_SHADER_VERTEX, tgsi_vs_mtex);
+}
+void virgl_setup_mtex_mod_fs(struct VirglCmdBuf *cbuf, uint32 handle)
+{
+    DCHIP("virgl_setup_mtex_mod_fs: handle=%lu", handle);
+    virgl_cmd_create_shader(cbuf, handle, PIPE_SHADER_FRAGMENT, tgsi_fs_mtex_mod);
+}
+
 /* SET_STENCIL_REF -- payload 1 dword: front ref | (back ref << 8) */
 void virgl_cmd_set_stencil_ref(struct VirglCmdBuf *cbuf, uint32 front, uint32 back)
 {

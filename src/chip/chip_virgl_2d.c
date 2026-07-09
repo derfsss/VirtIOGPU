@@ -81,6 +81,9 @@
 #define V2D_HANDLE_FS_BLEND      114
 #define V2D_HANDLE_VE3           115   /* 3-attr VE (0/16/32, stride 48)        */
 #define V2D_HANDLE_FS_REPFOG     116   /* REPLACE+fog FS (W3D wide path)        */
+#define V2D_HANDLE_VS_MTEX       117   /* 4-attr multitexture VS                */
+#define V2D_HANDLE_FS_MTEX_MOD   118   /* multitexture stage1-MODULATE FS       */
+#define V2D_HANDLE_VE_MTEX       119   /* 4-attr VE (0/16/32/48, stride 64)     */
 
 /* Vertex buffer size in bytes.  64 KiB so warp3d.library can batch large
  * indexed draws (e.g. the cow demo) into one INLINE_WRITE+DRAW_VBO submit;
@@ -318,6 +321,20 @@ BOOL chip_virgl_init_2d(struct ChipGPUState *gs)
               (unsigned long)gs->virgl_2d_fs_repfog);
     }
 
+    /* Multitexture pipeline (W3D V5 combined model, stage1 MODULATE -- the
+     * Quake2 lightmap path).  Best-effort like the texenv shaders: a failed
+     * handle stays 0 and the backend keeps multitexture gated OFF. */
+    gs->virgl_2d_vs_mtex = 0; gs->virgl_2d_fs_mtex_mod = 0;
+    if (gs->virgl_shaders_ok) {
+        virgl_cmd_reset(&cbuf); virgl_setup_mtex_vs(&cbuf, V2D_HANDLE_VS_MTEX);
+        if (virgl_submit(gs, ctx_id, &cbuf)) gs->virgl_2d_vs_mtex = V2D_HANDLE_VS_MTEX;
+        virgl_cmd_reset(&cbuf); virgl_setup_mtex_mod_fs(&cbuf, V2D_HANDLE_FS_MTEX_MOD);
+        if (virgl_submit(gs, ctx_id, &cbuf)) gs->virgl_2d_fs_mtex_mod = V2D_HANDLE_FS_MTEX_MOD;
+        DCHIP("virgl_init_2d: mtex shaders vs=%lu fs_mod=%lu",
+              (unsigned long)gs->virgl_2d_vs_mtex,
+              (unsigned long)gs->virgl_2d_fs_mtex_mod);
+    }
+
     if (!gs->virgl_shaders_ok) {
         DCHIP("virgl_init_2d: SHADER CREATION FAILED -- shaders disabled");
         DCHIP("virgl_init_2d: CLEAR/BLIT still work, textured draw unavailable");
@@ -417,6 +434,27 @@ BOOL chip_virgl_init_2d(struct ChipGPUState *gs)
         if (virgl_submit(gs, ctx_id, &cbuf)) {
             gs->virgl_2d_ve3 = V2D_HANDLE_VE3;
             DCHIP("virgl_init_2d: VE3=%lu created (stride 48)", (unsigned long)V2D_HANDLE_VE3);
+        }
+    }
+
+    /* 4-attribute VE for multitexture: pos@0, tc0@16, colour@32, tc1@48,
+     * stride 64 (matches tgsi_vs_mtex IN order). */
+    gs->virgl_2d_ve_mtex = 0;
+    if (gs->virgl_shaders_ok && gs->virgl_2d_vs_mtex) {
+        struct VirglVertexElement vem[4];
+        int i;
+        virgl_cmd_reset(&cbuf);
+        for (i = 0; i < 4; i++) {
+            vem[i].src_offset = (uint32)i * 16u;
+            vem[i].instance_divisor = 0;
+            vem[i].vertex_buffer_index = 0;
+            vem[i].src_format = PIPE_FORMAT_R32G32B32A32_FLOAT;
+        }
+        virgl_cmd_create_vertex_elements(&cbuf, V2D_HANDLE_VE_MTEX, 4, vem);
+        if (virgl_submit(gs, ctx_id, &cbuf)) {
+            gs->virgl_2d_ve_mtex = V2D_HANDLE_VE_MTEX;
+            DCHIP("virgl_init_2d: VE_MTEX=%lu created (stride 64)",
+                  (unsigned long)V2D_HANDLE_VE_MTEX);
         }
     }
 
@@ -648,6 +686,9 @@ BOOL chip_virgl_recover_2d(struct ChipGPUState *gs)
     gs->virgl_2d_fs_blend = 0;
     gs->virgl_2d_fs_repfog = 0;
     gs->virgl_2d_ve3 = 0;
+    gs->virgl_2d_vs_mtex = 0;
+    gs->virgl_2d_fs_mtex_mod = 0;
+    gs->virgl_2d_ve_mtex = 0;
     gs->virgl_shaders_ok = FALSE;
     gs->virgl_samplers_ok = FALSE;
 

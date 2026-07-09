@@ -527,6 +527,9 @@ struct ChipGPUState {
     uint32  virgl_2d_fs_blend;  /* W3D_BLEND fragment shader handle */
     uint32  virgl_2d_fs_repfog; /* REPLACE+fog fragment shader handle */
     uint32  virgl_2d_ve3;       /* 3-attr vertex elements (stride 48) handle */
+    uint32  virgl_2d_vs_mtex;   /* 4-attr multitexture VS (pos+tc0+col+tc1) */
+    uint32  virgl_2d_fs_mtex_mod; /* multitexture stage1-MODULATE FS (2 samplers) */
+    uint32  virgl_2d_ve_mtex;   /* 4-attr vertex elements (stride 64) handle */
     uint32  virgl_2d_vbuf_res;  /* vertex buffer resource ID (PIPE_BUFFER) */
     uint32  virgl_test_quad;    /* 0=off, 1=colored quad, 2=textured quad (debug) */
 

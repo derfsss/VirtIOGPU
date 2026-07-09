@@ -395,7 +395,36 @@ static APTR get_wv(W3D_Context *ctx)
  * 2914 verts in submission order = the distorted spikes.  No-op it; slot 69 draws. */
 static uint32 hw_s76(APTR Self, W3D_Context *ctx, uint32 b, uint32 c, uint32 d)
 {
-    (void)Self; (void)ctx; (void)b; (void)c; (void)d;
+    (void)Self; (void)c; (void)d;
+    /* Map slot 72+4=76 is ALSO W3D_SetTextureBlend (the cow-era traffic here
+     * was different -- see comment above).  Distinguish by content: a RAM
+     * pointer whose first tag is in the W3D_STB_TAGS range (TAG_USER +
+     * 0x204000 + 1..14) is a SetTextureBlend taglist -- parse the combined
+     * model's BLEND_STAGE + ENV_MODE and record stage 1's env (the FS is
+     * fixed stage1-MODULATE for now; a non-MODULATE request is logged so we
+     * know when another combine mode is needed).  Anything else keeps the
+     * historic no-op. */
+    if (ctx && ctx->driver && b >= 0x10000000 && b < 0x80000000) {
+        const struct TagItem *t = (const struct TagItem *)(APTR)b;
+        if ((t->ti_Tag & 0xFFFFF000u) == 0x80204000u) {
+            struct W3DVirgl *wv = (struct W3DVirgl *)ctx->driver;
+            uint32 stage = 0;
+            while (t->ti_Tag != TAG_DONE) {
+                if      (t->ti_Tag == 0x80204001u) stage = (uint32)t->ti_Data;  /* W3D_BLEND_STAGE */
+                else if (t->ti_Tag == 0x8020400Du) {                            /* W3D_ENV_MODE */
+                    if (stage == 1) {
+                        wv->stage1_env = (uint32)t->ti_Data;
+                        if (wv->stage1_env != W3D_MODULATE)
+                            DBP("SetTextureBlend: stage1 env %lu != MODULATE "
+                                "-- FS renders MODULATE regardless\n",
+                                (unsigned long)wv->stage1_env);
+                    }
+                }
+                t++;
+            }
+            return 0;   /* W3D_SUCCESS */
+        }
+    }
     return 0;
 }
 
@@ -489,14 +518,26 @@ static uint32 hw_SetStateFn(APTR Self, W3D_Context *ctx, uint32 state, uint32 ac
                 "SetState passthrough\n",
                 (unsigned long)state, (unsigned long)action);
     }
-    /* Multitexture negotiation (recon 2026-07-09): MiniGL asks NUM_TMU(0xAA)
-     * NUM_BLEND(0xAB) ENV_COMBINE(0xAC) ENV_ADD(0xAD) ENV_CROSSBAR(0xAF)
-     * through THIS vector; the SetState passthrough returns 0 = "0 TMUs" =
-     * multitexture correctly gated OFF.  DO NOT answer NUM_TMU > 0 until the
-     * backend dual-texture render path exists (chip dual-tex shaders +
-     * TCOORD_1 gather + SetTextureBlend), or MiniGL will USE it and break
-     * rendering.  When the path lands: 0xAA/0xAB -> 2, 0xAC/0xAF ->
-     * W3D_NOT_SUPPORTED(5) (combined model only), 0xAD per shader support. */
+    /* Multitexture negotiation (recon + implementation 2026-07-09): MiniGL
+     * asks NUM_TMU(0xAA) NUM_BLEND(0xAB) ENV_COMBINE(0xAC) ENV_ADD(0xAD)
+     * ENV_SUB(0xAE) ENV_CROSSBAR(0xAF) through THIS vector.  Now that the
+     * dual-texture path exists (chip mtex pipeline + TCOORD_1 gather +
+     * stage1-MODULATE FS), answer honestly: 2 TMUs when the chip created
+     * the pipeline (else 1), combined model only (ENV_COMBINE / CROSSBAR /
+     * ADD / SUB all W3D_NOT_SUPPORTED=5 -- no shaders for them yet). */
+    if (state == 0xAA || state == 0xAB) {
+        struct W3DVirgl *wvq = (struct W3DVirgl *)ctx->driver;
+        uint32 tmus = (wvq && wvq->info.vs_mtex_handle &&
+                       wvq->info.fs_mtex_mod_handle &&
+                       wvq->info.ve_mtex_handle) ? 2u : 1u;
+        DBP("query NUM_TMU/NUM_BLEND(0x%lx) -> %lu\n",
+            (unsigned long)state, (unsigned long)tmus);
+        return tmus;
+    }
+    if (state >= 0xAC && state <= 0xAF) {
+        DBP("query ENV_*(0x%lx) -> NOT_SUPPORTED(5)\n", (unsigned long)state);
+        return 5;   /* W3D_NOT_SUPPORTED: combined model only */
+    }
     return w3d_SetState((struct Warp3DIFace *)0, ctx, state, action);
 }
 /* SetZCompareMode(ctx, mode) at off 208 (idx 37).  Was "accept and ignore"

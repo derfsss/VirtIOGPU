@@ -117,6 +117,19 @@ struct W3DVirgl {
                                      * only, destroy) must w3d_batch_flush()
                                      * FIRST to preserve command order. */
 
+    /* Multitexture (W3D V5 combined model, 2026-07-09): stage-1 texture,
+     * second texcoord set, the FE's W3D_MULTITEXTURE state bit, and the
+     * stage-1 env mode from W3D_SetTextureBlend (default MODULATE -- the
+     * Quake2 lightmap combine). */
+    W3D_Texture *cur_tex1;          /* TMU1 texture (BindTexture tmu=1) */
+    BOOL   ia_has_tcoord1;          /* interleaved array carries TCOORD_1 */
+    uint32 ia_tcoord1_off;
+    const UBYTE *ga_tc1;            /* gather view: second texcoord set */
+    int    ga_tc1_st;
+    uint32 ga_tc1_voff;
+    BOOL   mtex_on;                 /* W3D_MULTITEXTURE (1<<28) in ctx+0x1c */
+    uint32 stage1_env;              /* W3D_ENV_MODE for stage 1 */
+
     /* Currently bound texture (TMU 0), NULL = untextured (colour) draws. */
     W3D_Texture *cur_tex;
 

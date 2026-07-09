@@ -1716,7 +1716,8 @@ uint32 w3d_BindTexture(struct Warp3DIFace *Self, W3D_Context *ctx,
     (void)Self;
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
-    if (tmu == 0) wv->cur_tex = tex;   /* only TMU0 (single-texture) */
+    if      (tmu == 0) wv->cur_tex  = tex;
+    else if (tmu == 1) wv->cur_tex1 = tex;   /* multitexture stage 1 */
     return W3D_SUCCESS;
 }
 
@@ -1974,6 +1975,7 @@ uint32 w3d_InterleavedArray(struct Warp3DIFace *Self, W3D_Context *ctx,
     wv->ia_has_color = FALSE;  wv->ia_color_off  = 0;
     wv->ia_has_tcoord = FALSE; wv->ia_tcoord_off = 0;
     wv->ia_has_fog = FALSE;    wv->ia_fog_off    = 0;
+    wv->ia_has_tcoord1 = FALSE; wv->ia_tcoord1_off = 0;
 
     /* position = 3 floats @ 0; then attributes in ascending VFORMAT bit order */
     off = 3 * 4;
@@ -1983,6 +1985,7 @@ uint32 w3d_InterleavedArray(struct Warp3DIFace *Self, W3D_Context *ctx,
     if (format & W3D_VFORMAT_SCOLOR)     off += 16;
     else if (format & W3D_VFORMAT_PACK_SCOLOR) off += 4;
     if (format & W3D_VFORMAT_TCOORD_0)   { wv->ia_has_tcoord = TRUE; wv->ia_tcoord_off = off; off += 12; } /* u,v,w = 3 floats (SDK), not 8 */
+    if (format & W3D_VFORMAT_TCOORD_1)   { wv->ia_has_tcoord1 = TRUE; wv->ia_tcoord1_off = off; off += 12; }
 
     return W3D_SUCCESS;
 }
@@ -2025,18 +2028,29 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
      * (interleaved array OR the separate V4 TexCoordPointer). */
     struct W3DTexInfo *ti = (wv->cur_tex && wv->cur_tex->driver && wv->ga_tc)
                             ? (struct W3DTexInfo *)wv->cur_tex->driver : NULL;
+    /* MULTITEXTURE path (W3D V5 combined, stage1 MODULATE): engaged when the
+     * FE's W3D_MULTITEXTURE state is on, BOTH textures are bound, the gather
+     * has a second texcoord set, and the chip created the mtex pipeline. */
+    struct W3DTexInfo *ti1 = (wv->mtex_on && ti &&
+                              wv->cur_tex1 && wv->cur_tex1->driver &&
+                              wv->ga_tc1)
+                             ? (struct W3DTexInfo *)wv->cur_tex1->driver : NULL;
+    BOOL mtex = (ti1 && ti1->magic == W3DTEX_MAGIC &&
+                 wv->info.vs_mtex_handle && wv->info.fs_mtex_mod_handle &&
+                 wv->info.ve_mtex_handle);
     /* WIDE combine path: textured + (non-REPLACE texenv OR fogging) + the
      * 3-attr objects exist + the array carries colour.  Else the EXACT
      * original 8-float/stride-32 path runs (plain REPLACE + untextured =
      * R8-safe, byte-identical; untextured fog is pre-mixed on the CPU). */
-    BOOL wide = (ti && (wv->texenv_mode != W3D_REPLACE || wv->fog_on) &&
+    BOOL wide = (!mtex &&
+                 ti && (wv->texenv_mode != W3D_REPLACE || wv->fog_on) &&
                  wv->ga_col != NULL &&
                  wv->info.vs3_handle && wv->info.ve3_handle &&
                  ((wv->texenv_mode == W3D_MODULATE && wv->info.fs_modulate_handle) ||
                   (wv->texenv_mode == W3D_DECAL    && wv->info.fs_decal_handle)    ||
                   (wv->texenv_mode == W3D_BLEND    && wv->info.fs_blend_handle)    ||
                   (wv->texenv_mode == W3D_REPLACE  && wv->info.fs_repfog_handle)));
-    num_floats = nverts * (wide ? 12 : 8);
+    num_floats = nverts * (mtex ? 16 : wide ? 12 : 8);
 
     /* Append to the pending batch; flush first if this chunk might not fit
      * (worst-case chunk = state ~120 + IW header 11 + floats + draw ~13,
@@ -2061,7 +2075,28 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
         wv->pending_clear = FALSE;
     }
 
-    if (wide) {
+    if (mtex) {
+        /* Dual-texture: 4-attr VS + stage1-MODULATE FS + BOTH samplers. */
+        uint32 samps[2], views[2];
+        float consts[8];
+        struct W3DTexInfo *t0 = ti;
+        samps[0] = tex_sampler(&cbuf, wv, t0);
+        samps[1] = tex_sampler(&cbuf, wv, ti1);
+        views[0] = t0->view;
+        views[1] = ti1->view;
+        consts[0] = wv->texenv_color[0]; consts[1] = wv->texenv_color[1];
+        consts[2] = wv->texenv_color[2]; consts[3] = wv->texenv_color[3];
+        consts[4] = wv->fog_color[0];    consts[5] = wv->fog_color[1];
+        consts[6] = wv->fog_color[2];    consts[7] = 1.0f;
+        virgl_cmd_bind_object(&cbuf, VIRGL_OBJECT_VERTEX_ELEMENTS,
+                              wv->info.ve_mtex_handle);
+        virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_VERTEX, wv->info.vs_mtex_handle);
+        virgl_cmd_bind_shader(&cbuf, PIPE_SHADER_FRAGMENT, wv->info.fs_mtex_mod_handle);
+        virgl_cmd_bind_sampler_states(&cbuf, PIPE_SHADER_FRAGMENT, 0, 2, samps);
+        virgl_cmd_set_sampler_views(&cbuf, PIPE_SHADER_FRAGMENT, 0, 2, views);
+        virgl_cmd_set_constant_buffer(&cbuf, PIPE_SHADER_FRAGMENT, 0, consts, 8);
+        wv->ve3_bound = TRUE;   /* non-default VE bound: narrow path rebinds */
+    } else if (wide) {
         /* MODULATE/DECAL/BLEND/REPLACE+fog: 3-attr VS + the mode's FS. */
         uint32 fs = (wv->texenv_mode == W3D_MODULATE) ? wv->info.fs_modulate_handle
                   : (wv->texenv_mode == W3D_DECAL)    ? wv->info.fs_decal_handle
@@ -2138,7 +2173,21 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
         virgl_emit_float(&cbuf, z);                       /* ndc z -> depth */
         virgl_emit_float(&cbuf, 1.0f);                    /* w */
 
-        if (wide) {
+        if (mtex) {
+            /* pos4 + tc0(u,v,fog,1) + col4 + tc1(u,v,0,1) = 16 floats */
+            const UBYTE *tp1 = wv->ga_tc1 + idx * (uint32)wv->ga_tc1_st;
+            float c4[4];
+            float ff = wv->fog_on ? fog_factor(wv, fp, z) : 1.0f;
+            virgl_emit_float(&cbuf, ((const float *)tp)[0]);
+            virgl_emit_float(&cbuf, *(const float *)(tp + wv->ga_tc_voff));
+            virgl_emit_float(&cbuf, ff);   virgl_emit_float(&cbuf, 1.0f);
+            ga_read_color(wv, cp, c4);   /* carried for future stage modes */
+            virgl_emit_float(&cbuf, c4[0]); virgl_emit_float(&cbuf, c4[1]);
+            virgl_emit_float(&cbuf, c4[2]); virgl_emit_float(&cbuf, c4[3]);
+            virgl_emit_float(&cbuf, ((const float *)tp1)[0]);
+            virgl_emit_float(&cbuf, *(const float *)(tp1 + wv->ga_tc1_voff));
+            virgl_emit_float(&cbuf, 0.0f); virgl_emit_float(&cbuf, 1.0f);
+        } else if (wide) {
             /* GENERIC[0]=texcoord (+fog factor in .z), GENERIC[1]=colour. */
             float c4[4];
             float ff = wv->fog_on ? fog_factor(wv, fp, z) : 1.0f;
@@ -2179,7 +2228,7 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
         }
     }
 
-    vb.stride = wide ? 48 : 32;
+    vb.stride = mtex ? 64 : wide ? 48 : 32;
     vb.buffer_offset = wv->batch_vbuf_used;   /* this chunk's vbuf region */
     vb.res_handle = wv->info.vbuf_res;
     virgl_cmd_set_vertex_buffers(&cbuf, 1, &vb);
@@ -2287,6 +2336,8 @@ static uint32 draw_gather_setup(W3D_Context *ctx, struct W3DVirgl *wv)
         wv->ga_tc_st = wv->ia_stride;           wv->ga_tc_voff = 4;
         wv->ga_fog = wv->ia_has_fog    ? wv->ia_ptr + wv->ia_fog_off    : NULL;
         wv->ga_fog_st = wv->ia_stride;
+        wv->ga_tc1 = wv->ia_has_tcoord1 ? wv->ia_ptr + wv->ia_tcoord1_off : NULL;
+        wv->ga_tc1_st = wv->ia_stride;          wv->ga_tc1_voff = 4;
     } else if (ctx->VertexPointer) {
         wv->ga_pos = (const UBYTE *)ctx->VertexPointer;
         wv->ga_pos_st = ctx->VPStride ? ctx->VPStride : 12;
@@ -2297,9 +2348,20 @@ static uint32 draw_gather_setup(W3D_Context *ctx, struct W3DVirgl *wv)
         wv->ga_tc_st = ctx->TPStride[0] ? ctx->TPStride[0] : 8;
         wv->ga_tc_voff = ctx->TPVOffs[0] ? (uint32)ctx->TPVOffs[0] : 4;
         wv->ga_fog = NULL; wv->ga_fog_st = 0;  /* FogCoordPointer: later */
+        wv->ga_tc1 = (const UBYTE *)ctx->TexCoordPointer[1];
+        wv->ga_tc1_st = ctx->TPStride[1] ? ctx->TPStride[1] : 8;
+        wv->ga_tc1_voff = ctx->TPVOffs[1] ? (uint32)ctx->TPVOffs[1] : 4;
     } else {
         wv->ga_pos = NULL;
     }
+    /* Multitexture enable rides the FE state word like depth/blend */
+    wv->mtex_on = ((uint32)(APTR)ctx >= 0x10000000 &&
+                   (uint32)(APTR)ctx < 0x80000000)
+        ? ((*(volatile uint32 *)((UBYTE *)ctx + 0x1c) & W3D_MULTITEXTURE) != 0)
+        : FALSE;
+    /* mtex chunks carry 16 floats/vert: cap so a max chunk still fits the
+     * command buffer (999 = 333*3; 16*999 + state < 16384). */
+    if (wv->mtex_on && wv->cur_tex1) CHUNK = 999U;
     /* Transition-only census: one line per texenv MODE CHANGE tells us which
      * path (WIDE combine vs narrow REPLACE) a real workload actually runs --
      * the June grey-window revert lacked exactly this visibility. */

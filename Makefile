@@ -48,6 +48,7 @@ INFO_TARGET = $(BUILD_DIR)/virtiogpu_info
 GPUVTEST_TARGET = $(BUILD_DIR)/gpu_vtest
 W3DTRI_TARGET = $(BUILD_DIR)/w3dtri
 W3DSUITE_TARGET = $(BUILD_DIR)/w3d_suite
+W3DPRESENT_TARGET = $(BUILD_DIR)/w3d_present
 
 # -----------------------------------------------------------------------
 # Chip driver sources (Picasso96 .chip plugin)
@@ -173,6 +174,10 @@ $(W3DTRI_TARGET): src/tools/w3dtri.c
 	$(CC) -O2 -Wall $< -o $@ -lauto
 
 $(W3DSUITE_TARGET): src/tools/w3d_suite.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -O2 -Wall $< -o $@ -lauto
+
+$(W3DPRESENT_TARGET): src/tools/w3d_present.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) -O2 -Wall $< -o $@ -lauto
 

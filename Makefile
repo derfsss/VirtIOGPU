@@ -35,6 +35,12 @@ CHIP_CFLAGS  = -O2 -Wall -I./include -I./include/gpulib \
 ifdef SHIM_CONTRACT
 CHIP_CFLAGS += -DGPU_SHIM_CONTRACT
 endif
+# `make VTABLE_PROBE=1 ...` dumps the 68 BoardInfo vtable slots as
+# PCIGraphics.card hands them over, before the chip assigns any
+# (P96_Replacement Phase 9 Step 0).  Diagnostic only -- do not ship.
+ifdef VTABLE_PROBE
+CHIP_CFLAGS += -DGPU_VTABLE_PROBE
+endif
 CHIP_LDFLAGS = -mcrt=newlib -nostartfiles
 
 # Docker image used to run lha when it is not on the host PATH

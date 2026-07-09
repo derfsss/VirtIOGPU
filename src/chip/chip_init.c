@@ -904,6 +904,45 @@ static void chip_register_edid(struct ChipGPUState *gs, struct BoardInfo *bi)
  * Performs full VirtIO GPU init inline (no virtiogpu.device dependency).
  * Fills BoardInfo and returns TRUE on success.
  * ----------------------------------------------------------------------- */
+#ifdef GPU_VTABLE_PROBE
+/* TEMPORARY (P96_Replacement Phase 9, Step 0).  Dump the BoardInfo vtable
+ * exactly as PCIGraphics.card hands it to us, BEFORE the chip assigns a
+ * single slot.
+ *
+ * This settles a question the project has assumed and never measured:
+ * SHIM_CONTRACT.md says non-contract slots "must be LEFT UNASSIGNED --
+ * PCIGraphics.card pre-fills every one", while boardinfo.h says "Any
+ * unimplemented entry MUST point to a valid no-op stub".  A NULL slot is
+ * entered through the kernel's 68k emulator at PC=0 (DSI, DAR=0,
+ * kernel+0x1B99C), so the difference is a boot loop.
+ *
+ * Vtable = 68 function pointers at byte offset 274 (pack(2), so the array
+ * is 2-byte aligned -- read it as bytes' worth of words via memcpy-free
+ * word loads, which PPC permits unaligned).
+ *
+ * Build with `make VTABLE_PROBE=1`, boot once, revert. */
+static void chip_probe_vtable(struct BoardInfo *bi)
+{
+    const UBYTE *base = (const UBYTE *)bi + 274;
+    uint32 filled = 0, i;
+
+    DCHIP("VTPROBE ==== BoardInfo vtable as PCIGraphics handed it to us ====");
+    DCHIP("VTPROBE bi=%p RegisterBase=%p MemoryBase=%p MemorySize=%lu "
+          "Flags=0x%lX", bi, bi->RegisterBase, bi->MemoryBase,
+          (uint32)bi->MemorySize, (uint32)bi->Flags);
+
+    for (i = 0; i < 68; i++) {
+        const UBYTE *p = base + i * 4;
+        uint32 v = ((uint32)p[0] << 24) | ((uint32)p[1] << 16)
+                 | ((uint32)p[2] <<  8) |  (uint32)p[3];
+        if (v != 0) filled++;
+        DCHIP("VTPROBE slot[%2lu] = 0x%08lX%s", i, v, v ? "" : "   <== NULL");
+    }
+    DCHIP("VTPROBE ==== %lu of 68 slots pre-filled, %lu NULL ====",
+          filled, (uint32)(68 - filled));
+}
+#endif /* GPU_VTABLE_PROBE */
+
 BOOL chip_InitCard_C(struct BoardInfo *bi, char **toolTypes, APTR cardDesc)
 {
     (void)toolTypes;
@@ -914,6 +953,9 @@ BOOL chip_InitCard_C(struct BoardInfo *bi, char **toolTypes, APTR cardDesc)
     g_IExec_early = IExec;
 
     DCHIP("InitCard_C v53.65 entry: bi=%p cardDesc=%p SysBase=%p", bi, cardDesc, SysBase);
+#ifdef GPU_VTABLE_PROBE
+    chip_probe_vtable(bi);
+#endif
     DCHIP("GPU format=B8G8R8X8_UNORM(2) -- LE-host pixman maps to "
           "x8r8g8b8 (Cairo ARGB32) for both pixman + GL backends");
 

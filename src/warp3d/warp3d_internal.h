@@ -99,6 +99,23 @@ struct W3DVirgl {
     uint32 depth_func;              /* PIPE_FUNC_* from SetZCompareMode
                                      * (default LESS; non-LESS routes the
                                      * draw to the dynamic DSA) */
+    uint32 batch_vbuf_used;         /* bytes of the shared 64K vbuf consumed
+                                     * by chunks in the PENDING batch.  Each
+                                     * chunk gets its own vbuf region:
+                                     * rewriting the same region twice within
+                                     * ONE submission makes both draws sample
+                                     * the LAST write (virglrenderer;
+                                     * empirically cost w3d_suite check 7). */
+    uint32 batch_used;              /* dwords of wv->cmdbuf holding NOT-YET-
+                                     * SUBMITTED draw chunks (draw batching,
+                                     * 2026-07-09: one virtio submit per
+                                     * ~100 draws instead of per draw -- the
+                                     * measured ~1fps Quake2 cost was per-
+                                     * draw submit overhead under TCG).
+                                     * EVERY out-of-band submit (texture
+                                     * create/free, PresentBitmap, clear-
+                                     * only, destroy) must w3d_batch_flush()
+                                     * FIRST to preserve command order. */
 
     /* Currently bound texture (TMU 0), NULL = untextured (colour) draws. */
     W3D_Texture *cur_tex;
@@ -233,6 +250,7 @@ uint32       w3d_ClearZBuffer(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Do
 uint32       w3d_SetZCompareMode(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 mode);
 uint32       w3d_UpdateTexture(W3D_Context *ctx, W3D_Texture *tex);
 uint32       w3d_GetTexFmtInfo(W3D_Context *ctx, uint32 format, uint32 destfmt);
+void         w3d_batch_flush(struct W3DVirgl *wv);
 void         w3d_DestroyContext(struct Warp3DIFace *Self, W3D_Context *ctx);
 uint32       w3d_GetState(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 state);
 uint32       w3d_SetState(struct Warp3DIFace *Self, W3D_Context *ctx, uint32 state, uint32 action);

@@ -224,6 +224,7 @@ static void frame_present(struct W3DVirgl *wv, struct BitMap *bm)
     uint32 bpr = 0, bw = 0, bh = 0, pw, ph;
 
     if (!g_IV3D || !g_IV3D->PresentBitmap || !bm) return;
+    w3d_batch_flush(wv);   /* all pending draws must land before the readback */
     if (!bitmap_geometry(bm, &bw, &bh, &bpr) || !bpr) return;
     pw = wv->fb_w; if (bw && pw > bw) pw = bw; if (pw > bpr / 4) pw = bpr / 4;
     ph = wv->fb_h; if (bh && ph > bh) ph = bh;
@@ -672,6 +673,7 @@ static uint32 draw_packed(struct W3DVirgl *wv, const float *verts,
         0, nverts - 1,          /* min_index, max_index */
         0);                     /* cso_handle (use bound state) */
 
+    w3d_batch_flush(wv);   /* immediate draw: order after pending batch */
     if (!g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id,
                         cbuf.buf, cbuf.dwords)) {
         DW3D("draw_packed: Submit FAILED (%lu verts)\n", (unsigned long)nverts);
@@ -986,6 +988,7 @@ void w3d_DestroyContext(struct Warp3DIFace *Self, W3D_Context *ctx)
     if (ctx->driver) {
         struct W3DVirgl *wv = ctx->driver;
         if (g_IV3D) {
+            w3d_batch_flush(wv);
             g_IV3D->RegisterOverlay(g_IV3D, wv->info.token, 0,
                                     0, 0, 0, 0, 0, 0, FALSE);
             g_IV3D->FreeRenderTarget(g_IV3D, wv->info.token,
@@ -1312,6 +1315,7 @@ uint32 w3d_ClearStencil(W3D_Context *ctx, uint32 *clearval)
     struct VirglCmdBuf cb;
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
+    w3d_batch_flush(wv);
     virgl_cmd_init(&cb, cw, 64);
     bind_rt_framebuffer(&cb, wv);
     virgl_cmd_clear(&cb, PIPE_CLEAR_STENCIL, 0.0f, 0.0f, 0.0f, 0.0f, 1.0,
@@ -1628,6 +1632,7 @@ W3D_Texture *w3d_AllocTexObj(struct Warp3DIFace *Self, W3D_Context *ctx,
     }
 
     /* Upload as R8G8B8A8 (the cow's textures are 32bpp RGBA RAW). */
+    w3d_batch_flush(wv);
     if (!g_IV3D->CreateTexture(g_IV3D, wv->info.token, w, h, image, w * 4,
                                &ti->view, &ti->res)) {
         DW3D("AllocTexObj: CreateTexture failed %lux%lu\n",
@@ -1687,6 +1692,7 @@ void w3d_FreeTexObj(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Texture *tex
         wv = ctx->driver;
         if (wv->cur_tex == tex) wv->cur_tex = NULL;
         if (g_IV3D) {
+            w3d_batch_flush(wv);   /* pending draws may reference this texture */
             if (ti->sampler) {   /* private filter/wrap sampler object */
                 uint32 dw[8]; struct VirglCmdBuf dcb;
                 virgl_cmd_init(&dcb, dw, 8);
@@ -1833,6 +1839,7 @@ uint32 w3d_UpdateTexture(W3D_Context *ctx, W3D_Texture *tex)
     if (ti->magic != W3DTEX_MAGIC) return W3D_ILLEGALINPUT;
     if (!tex->texsource) return W3D_ILLEGALINPUT;
 
+    w3d_batch_flush(wv);   /* pending draws reference the OLD texture content */
     {
         APTR scratch = NULL;
         APTR up = tex_to_rgba(tex->texsource, ti->w, ti->h,
@@ -1920,6 +1927,7 @@ uint32 w3d_RealizeTexture(struct Warp3DIFace *Self, W3D_Context *ctx, W3D_Textur
 
     /* Upload as R8G8B8A8; other W3D_ATO_FORMATs (texfmtsrc) are CPU-converted
      * at upload time (scratch freed below -- CreateTexture copies). */
+    w3d_batch_flush(wv);
     {
         APTR scratch = NULL;
         APTR up = tex_to_rgba(image, w, h, (uint32)tex->texfmtsrc, &scratch);
@@ -1979,8 +1987,30 @@ uint32 w3d_InterleavedArray(struct Warp3DIFace *Self, W3D_Context *ctx,
     return W3D_SUCCESS;
 }
 
-/* Emit a chunk of gathered, screen->NDC-converted vertices into cbuf as an
- * INLINE_WRITE, then bind vbuf + draw.  Returns FALSE on submit failure.
+/* Draw batching (2026-07-09): draw chunks are SELF-CONTAINED (each rebinds
+ * its full state), so instead of one virtio submit per draw -- the measured
+ * source of Quake2's ~1 fps under TCG -- they are APPENDED into wv->cmdbuf
+ * and submitted lazily: when the buffer can't hold the next chunk, or when
+ * any out-of-band submit needs command ordering (texture create/free,
+ * PresentBitmap, clear-only flush, immediate draws, context destroy).
+ * Repeated INLINE_WRITEs into the shared vbuf within one submission are
+ * safe: virglrenderer translates them to glBufferSubData between draws and
+ * GL guarantees each draw sees the data as of its call. */
+void w3d_batch_flush(struct W3DVirgl *wv)
+{
+    if (!wv) return;
+    wv->batch_vbuf_used = 0;   /* vbuf regions are per-submission */
+    if (!wv->batch_used) return;
+    g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id,
+                   wv->cmdbuf, wv->batch_used);
+    wv->batch_used = 0;
+}
+
+#define W3D_VBUF_BYTES 65536u   /* the chip's shared vertex-buffer resource */
+
+/* Emit a chunk of gathered, screen->NDC-converted vertices as an
+ * INLINE_WRITE + bind vbuf + draw, APPENDED to the pending batch.
+ * Returns FALSE on encode failure.
  * idx_base == NULL means SEQUENTIAL indices (DrawArray): vertex i of the
  * chunk is gather index first+i. */
 static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
@@ -2008,7 +2038,18 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
                   (wv->texenv_mode == W3D_REPLACE  && wv->info.fs_repfog_handle)));
     num_floats = nverts * (wide ? 12 : 8);
 
-    virgl_cmd_init(&cbuf, wv->cmdbuf, W3D_CMDBUF_DWORDS);
+    /* Append to the pending batch; flush first if this chunk might not fit
+     * (worst-case chunk = state ~120 + IW header 11 + floats + draw ~13,
+     * padded to 256 for safety -- max chunks still fit an empty buffer),
+     * OR if its vertex data won't fit the remaining vbuf region (each chunk
+     * writes its OWN region -- see batch_vbuf_used). */
+    if (wv->batch_used + num_floats + 256 > W3D_CMDBUF_DWORDS ||
+        wv->batch_vbuf_used + num_floats * 4 > W3D_VBUF_BYTES)
+        w3d_batch_flush(wv);
+    cbuf.buf        = wv->cmdbuf;
+    cbuf.max_dwords = W3D_CMDBUF_DWORDS;
+    cbuf.dwords     = wv->batch_used;
+    cbuf.overflowed = FALSE;
     bind_rt_framebuffer(&cbuf, wv);
 
     if (wv->pending_clear) {
@@ -2061,13 +2102,17 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
         }
     }
 
-    /* INLINE_WRITE header (11 words) for the vbuf, then the gathered floats. */
+    /* INLINE_WRITE header (11 words) for the vbuf, then the gathered floats.
+     * Destination x = this chunk's OWN vbuf byte offset (region allocation:
+     * two writes to the same region in one submission make BOTH draws sample
+     * the second write's data). */
     virgl_emit_dword(&cbuf, VIRGL_CMD_HDR(VIRGL_CCMD_RESOURCE_INLINE_WRITE, 0,
                                           11 + num_floats));
     virgl_emit_dword(&cbuf, wv->info.vbuf_res);
     virgl_emit_dword(&cbuf, 0); virgl_emit_dword(&cbuf, 0);
     virgl_emit_dword(&cbuf, 0); virgl_emit_dword(&cbuf, 0);
-    virgl_emit_dword(&cbuf, 0); virgl_emit_dword(&cbuf, 0); virgl_emit_dword(&cbuf, 0);
+    virgl_emit_dword(&cbuf, wv->batch_vbuf_used);  /* x = dest byte offset */
+    virgl_emit_dword(&cbuf, 0); virgl_emit_dword(&cbuf, 0);
     virgl_emit_dword(&cbuf, num_floats * 4); /* w = byte size */
     virgl_emit_dword(&cbuf, 1); virgl_emit_dword(&cbuf, 1);
 
@@ -2134,24 +2179,30 @@ static BOOL draw_elements_chunk(struct W3DVirgl *wv, const UBYTE *idx_base,
         }
     }
 
-    vb.stride = wide ? 48 : 32; vb.buffer_offset = 0; vb.res_handle = wv->info.vbuf_res;
+    vb.stride = wide ? 48 : 32;
+    vb.buffer_offset = wv->batch_vbuf_used;   /* this chunk's vbuf region */
+    vb.res_handle = wv->info.vbuf_res;
     virgl_cmd_set_vertex_buffers(&cbuf, 1, &vb);
     virgl_cmd_draw_vbo(&cbuf, 0, nverts, pipe_prim, 0, 1, 0, 0, 0, 0,
                        0, nverts - 1, 0);
 
-    /* NEVER submit a truncated stream: virglrenderer would report "Illegal
-     * command buffer" and poison the host context (display freezes for good
-     * while the guest keeps running).  Dropping this chunk instead costs one
-     * partial draw and a serial line -- fail-visible, ctx stays healthy. */
+    /* NEVER let a truncated stream reach the host: virglrenderer would
+     * report "Illegal command buffer" and poison the context.  The ensure-
+     * space flush above makes this unreachable in practice; if it fires
+     * anyway, drop the WHOLE pending batch (fail-visible, ctx healthy). */
     if (cbuf.overflowed) {
-        DW3D("draw_chunk: cmd buffer OVERFLOWED (%lu/%lu dwords, %lu verts %s) -- DROPPED\n",
+        DW3D("draw_chunk: batch OVERFLOWED (%lu/%lu dwords, %lu verts %s) "
+             "-- batch DROPPED\n",
              (unsigned long)cbuf.dwords, (unsigned long)cbuf.max_dwords,
              (unsigned long)nverts, wide ? "wide" : "narrow");
+        wv->batch_used = 0;
         return FALSE;
     }
 
-    return g_IV3D->Submit(g_IV3D, wv->info.token, wv->info.ctx_id,
-                          cbuf.buf, cbuf.dwords);
+    /* Commit the appended chunk to the batch; submitted lazily. */
+    wv->batch_used = cbuf.dwords;
+    wv->batch_vbuf_used = (wv->batch_vbuf_used + num_floats * 4 + 15u) & ~15u;
+    return TRUE;
 }
 
 /* Shared per-draw prologue for DrawElements AND DrawArray: read the FE's
@@ -2355,6 +2406,7 @@ uint32 w3d_ClearZBuffer(struct Warp3DIFace *Self, W3D_Context *ctx,
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
     if (!wv->zres) return W3D_SUCCESS;  /* no depth buffer: nothing to clear */
+    w3d_batch_flush(wv);   /* clear must order after pending draws */
     if (clearvalue) z = (double)*clearvalue;
     DW3D("ClearZBuffer: z*1000=%ld\n", (long)(z * 1000.0));
     virgl_cmd_init(&cbuf, cmd_words, 64);
@@ -2412,6 +2464,7 @@ uint32 w3d_Flush(struct Warp3DIFace *Self, W3D_Context *ctx)
      * a clear-the-screen with no geometry) so it still takes effect. */
     if (!ctx || !ctx->driver) return W3D_ILLEGALINPUT;
     wv = ctx->driver;
+    w3d_batch_flush(wv);   /* Flush semantics: pending draws become observable */
     if (wv->pending_clear) {
         float cr = (float)((wv->clear_argb >> 16) & 0xFF) / 255.0f;
         float cg = (float)((wv->clear_argb >>  8) & 0xFF) / 255.0f;

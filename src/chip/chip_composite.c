@@ -803,6 +803,18 @@ static uint32 g_comp_sw_count  = 0;
 static uint32 g_comp_cpu_count = 0;
 static uint32 g_comp_total     = 0;
 
+/* hw=0 diagnosis (2026-07-09): WHY did each call divert off the HW path?
+ * One counter per gate + the first distinct non-opaque flag words, so the
+ * census names the dominant gate instead of just saying hw=0. */
+static uint32 g_comp_div_notours  = 0;   /* dest outside board_mem       */
+static uint32 g_comp_div_novirgl  = 0;   /* virgl 2D not ready           */
+static uint32 g_comp_div_dblbuf   = 0;   /* double-buffer mode           */
+static uint32 g_comp_div_alpha    = 0;   /* !opaque_simple flag combo    */
+static uint32 g_comp_div_hwfail   = 0;   /* HW attempt returned failure  */
+static uint32 g_comp_div_vtxmask  = 0;   /* vertex array / alpha mask    */
+static uint32 g_comp_div_srcbpp   = 0;   /* non-32bpp source             */
+static uint32 g_comp_alpha_flags_seen[4]; /* first distinct diverted flags */
+
 /* =======================================================================
  * CPU Porter-Duff compositor (Phase 8a).
  *
@@ -981,9 +993,19 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
         static uint32 comp_last_log = 0;
         if (g_comp_total - comp_last_log >= 256) {
             comp_last_log = g_comp_total;
-            DCHIP("composite census: total=%lu hw=%lu cpu=%lu sw=%lu",
+            DCHIP("composite census: total=%lu hw=%lu cpu=%lu sw=%lu | "
+                  "divert: notours=%lu novirgl=%lu dblbuf=%lu alpha=%lu "
+                  "hwfail=%lu vtxmask=%lu srcbpp=%lu flags=[%08lx %08lx %08lx %08lx]",
                   (ULONG)g_comp_total, (ULONG)g_comp_hw_count,
-                  (ULONG)g_comp_cpu_count, (ULONG)g_comp_sw_count);
+                  (ULONG)g_comp_cpu_count, (ULONG)g_comp_sw_count,
+                  (ULONG)g_comp_div_notours, (ULONG)g_comp_div_novirgl,
+                  (ULONG)g_comp_div_dblbuf, (ULONG)g_comp_div_alpha,
+                  (ULONG)g_comp_div_hwfail, (ULONG)g_comp_div_vtxmask,
+                  (ULONG)g_comp_div_srcbpp,
+                  (ULONG)g_comp_alpha_flags_seen[0],
+                  (ULONG)g_comp_alpha_flags_seen[1],
+                  (ULONG)g_comp_alpha_flags_seen[2],
+                  (ULONG)g_comp_alpha_flags_seen[3]);
         }
     }
 
@@ -1109,6 +1131,7 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
 
     /* Unsupported features -> software fallback */
     if (has_vertex_array || has_alpha_mask) {
+        g_comp_div_vtxmask++;
         g_comp_sw_count++;
         g_comp_total++;
         goto sw_fallback;
@@ -1131,6 +1154,7 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
 
         uint32 bpp = chip_format_bpp(src_format);
         if (bpp != 4) {
+            g_comp_div_srcbpp++;
             g_comp_sw_count++;
             g_comp_total++;
             goto sw_fallback;
@@ -1141,8 +1165,8 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
      * the GfxBench "not supported" finding) and virgl-off runs (plain
      * virtio-gpu-pci) go to our CPU compositor. On-board + virgl
      * continues into the proven HW/SW split below. */
-    if (!is_ours || !gs->virgl_2d_ready)
-        goto cpu_try;
+    if (!is_ours)            { g_comp_div_notours++; goto cpu_try; }
+    if (!gs->virgl_2d_ready) { g_comp_div_novirgl++; goto cpu_try; }
 
     /* With double-buffering, skip HW composite entirely:
      * - The Virgl surface is bound to a fixed resource at creation time.
@@ -1150,8 +1174,7 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
      * - flush_all overwrites GPU content with board_mem every 5ms anyway,
      *   so the HW result would only be visible for one frame at most.
      * SW composite updates board_mem; flush_all presents it next cycle. */
-    if (gs->double_buffer)
-        goto cpu_try;
+    if (gs->double_buffer) { g_comp_div_dblbuf++; goto cpu_try; }
 
     /* HYBRID (v53.174): the GPU path only renders PLAIN OPAQUE composites
      * correctly so far -- COMPFLAG_IgnoreDestAlpha set (opaque destination)
@@ -1168,9 +1191,19 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
     {
         BOOL opaque_simple = (flags & COMPFLAG_IgnoreDestAlpha) &&
             !(flags & (COMPFLAG_SrcAlphaOverride | COMPFLAG_DestAlphaOverride));
-        if (!opaque_simple)
+        if (!opaque_simple) {
+            int i;
+            g_comp_div_alpha++;
+            for (i = 0; i < 4; i++) {
+                if (g_comp_alpha_flags_seen[i] == flags) break;
+                if (g_comp_alpha_flags_seen[i] == 0) {
+                    g_comp_alpha_flags_seen[i] = flags;
+                    break;
+                }
+            }
             goto cpu_try;   /* CPU handles the alpha cases the GPU path
                                and stock-SW-on-screen can't */
+        }
     }
 
     /* Attempt hardware compositing under io_lock to prevent interleaving
@@ -1209,8 +1242,10 @@ static uint32 hook_CompositeTagList(struct Interface *Self,
 
         /* Fall back to the CPU compositor if HW can't handle it (it will
          * fall through to stock SW as a final resort). */
-        if (result == COMPERR_SoftwareFallback || result != COMPERR_Success)
+        if (result == COMPERR_SoftwareFallback || result != COMPERR_Success) {
+            g_comp_div_hwfail++;
             goto cpu_try;
+        }
 
         /* Screen destination: the GPU wrote the scanout, but board_mem (the
          * RAM shadow the flush task transfers) is still stale -- run the SW
